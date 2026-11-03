@@ -1,8 +1,8 @@
 /**
  * The photo-mode HUD policy. The game hides its HUD for activity lifetime states 1 and 2, so
- * the photo switch drives the type-17 lifetime sensor through the same path the Activity Host
- * window's Lifetime page uses: bind the SDK view against the live host instance, then set the
- * state. State 3 is the live default the switch hands back on exit.
+ * the photo switch drives the type-17 lifetime sensor through the message-5 path itself: the
+ * current activity link for the local slice supplies the exact region and generation the
+ * lifetime override queues against. State 3 is the live default the switch hands back on exit.
  */
 
 #include "photo_hud.h"
@@ -12,17 +12,13 @@
 #include <cstdio>
 
 #include "../../core/logging/log.h"
-#include "../../server/activity/activity_sdk_lifetime_runtime.h"
-#include "../../server/activity/host_runtime.h"
 #include "../../server/bap/runtime.h"
-#include "../../state/activity_sdk/runtime.h"
+#include "../../server/activity/host_runtime.h"
 
 namespace sunrise::client::photo {
 namespace {
 
 namespace host = server::activity::host;
-namespace lifetimes = server::activity::activity_sdk_lifetime;
-namespace sdk = state::activity_sdk;
 
 /** Lifetime state the game reads as "HUD hidden". */
 inline constexpr std::uint8_t kHiddenLifetimeState = 1;
@@ -43,40 +39,23 @@ void report_fail(const char* reason) noexcept {
 
 /** Applies the photo-mode HUD policy through the activity lifetime state. */
 void set_hud_hidden(bool hidden) noexcept {
-    const sdk::Snapshot catalog = sdk::snapshot();
-    if (!catalog) {
-        report_fail("catalog");
+    // The exact ActivityClient the local slice renders from; no unique-link requirement, so it
+    // works while several activity links are still arriving.
+    server::bap::CurrentActivityLinkView link{};
+    if (!server::bap::current_activity_link_view(-1, link)) {
+        report_fail("link");
         return;
     }
-    host::DiagnosticsSnapshot diagnostics{};
-    host::snapshot(diagnostics);
-    if (diagnostics.instanceCount == 0) {
-        report_fail("instance");
-        return;
-    }
-    // The local session is the only live host instance offline.
-    const host::InstanceSnapshot& instance = diagnostics.instances[0];
-    server::bap::ActivityLinkView link{};
-    (void)server::bap::activity_link_view(instance.binding, link);
-    const sdk::Selection selection{
-        instance.binding, link.matchingLinks, link.activityClientGeneration};
-    sdk::BoundView view{};
-    if (sdk::resolve(catalog, selection, view) != sdk::Status::ready) {
-        report_fail("resolve");
-        return;
-    }
-    server::bap::ActivityLinkView current{};
-    (void)server::bap::activity_link_view(instance.binding, current);
-    if (sdk::revalidate(view, instance.binding, current.matchingLinks,
-                        current.activityClientGeneration)
-        != sdk::Status::ready) {
-        report_fail("revalidate");
+    if (link.effectiveRegion < 0) {
+        report_fail("region");
         return;
     }
     const std::uint8_t state = hidden ? kHiddenLifetimeState : host::kDefaultLifetimeState;
-    const auto status = lifetimes::set(view, state);
-    if (status != server::activity::activity_sdk_lifetime::Status::ready) {
-        report_fail("set");
+    if (!server::bap::request_activity_lifetime_override(link.binding,
+                                                         state,
+                                                         link.effectiveRegion,
+                                                         link.activityClientGeneration)) {
+        report_fail("queue");
         return;
     }
     std::array<char, 64> line{};

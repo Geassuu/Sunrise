@@ -57,6 +57,12 @@ void apply(void* component) noexcept;
 void drive_camera(std::uint32_t playerIndex) noexcept;
 
 /**
+ * Applies a pending HUD state. Called every frame from the renderer thread, the same thread
+ * the Activity Host window uses, so the lifetime push shares its thread contract.
+ */
+void sync_hud() noexcept;
+
+/**
  * Sets the velocity the coming simulation step integrates.
  * @param body Character rigid body. Live only inside the step hook.
  */

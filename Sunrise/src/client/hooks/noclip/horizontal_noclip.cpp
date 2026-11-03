@@ -309,9 +309,10 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
     const bool enabledBeforeStep = poll_toggle();
     const bool flying = fly::enabled();
     // The detached camera owns the view and the movement keys, so the body stays untouched.
-    const bool photoing = photo::enabled() && !photo::detached_active();
+    const bool detached = photo::detached_active();
+    const bool photoing = photo::enabled() && !detached;
     std::byte* const before =
-        (enabledBeforeStep || flying || photoing) ? player_body(simulation) : nullptr;
+        (enabledBeforeStep || flying || photoing || detached) ? player_body(simulation) : nullptr;
     // Fly writes first, so the velocity read below is the one it asked for.
     if (flying) {
         fly::before_step(before);
@@ -325,22 +326,32 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
         nativeVelocity = field<std::array<float, kVectorLanes>>(before, kBodyVelocity);
         nativePosition = field<std::array<float, kVectorLanes>>(before, kBodyPosition);
     }
+    // The detached camera freezes the world: the step runs with no time, so every body holds
+    // its pose and the cloth stops swinging. The player's own body is pinned back below.
+    const bool frozen = detached;
     // Rest the body through the step: this hook writes the position, and contact damage scales
     // with speed. The held velocity goes back after the step. The free camera also carries its
     // own position, so it rests the same way.
-    const bool rested = ((enabledBeforeStep && flying) || photoing) && hasBody;
+    const bool rested = ((enabledBeforeStep && flying) || photoing || frozen) && hasBody;
     if (rested) {
         field<std::array<float, kVectorLanes>>(before, kBodyVelocity) = {};
     }
 
     const HavokStep next = reinterpret_cast<HavokStep>(g_stepHandle.original);
-    const std::int32_t result = next != nullptr ? next(simulation, deltaTime) : 0;
+    const std::int32_t result =
+        next != nullptr ? next(simulation, frozen ? 0.0F : deltaTime) : 0;
 
     // The body is resolved once here for both features.
     std::byte* const body =
-        (enabledBeforeStep || flying || photoing) ? player_body(simulation) : nullptr;
+        (enabledBeforeStep || flying || photoing || detached) ? player_body(simulation) : nullptr;
     // A character created or replaced during this step has no matching before-state.
     const bool sameBody = hasBody && body == before;
+    // The detached camera pins the player: whatever the step did, the body goes back to where
+    // it stood and keeps no velocity, so the movement input cannot move the player.
+    if (frozen && sameBody) {
+        field<std::array<float, kVectorLanes>>(body, kBodyPosition) = nativePosition;
+        field<std::array<float, kVectorLanes>>(body, kBodyVelocity) = {};
+    }
     // Re-read after the step, so a toggle from the interface thread lands before a position write.
     // The free camera carries its position through the same branch as noclip, without needing the
     // noclip switch on.

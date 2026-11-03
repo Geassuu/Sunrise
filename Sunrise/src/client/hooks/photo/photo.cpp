@@ -104,8 +104,10 @@ std::atomic_bool g_detached{false};
 bool g_freecamInitialized{false};
 teleport::Vector g_freecamPosition{};
 std::uint64_t g_lastDriveTick{0};
-/** Whether the HUD-hidden lifetime state is applied, so the push happens once per switch. */
-std::atomic_bool g_hudHidden{false};
+/** The HUD state the camera thread wants; the renderer thread applies it. */
+std::atomic_bool g_hudWanted{false};
+/** The HUD state already applied, so the push happens once per switch. */
+std::atomic_bool g_hudApplied{false};
 
 /**
  * Takes the account's movement bindings once they are loaded.
@@ -459,17 +461,22 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(handle, std::memory_order_release);
         g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
         update_part_flags();
-        // The HUD policy follows the photo switch: lifetime state 1 hides the game HUD, and
-        // state 3 is the live default. Applied once per change.
-        const bool wantHudHidden = settings.enabled;
-        if (g_hudHidden.load(std::memory_order_relaxed) != wantHudHidden) {
-            client::photo::set_hud_hidden(wantHudHidden);
-            g_hudHidden.store(wantHudHidden, std::memory_order_relaxed);
-        }
+        // The HUD policy follows the photo switch; the renderer thread pushes it each frame.
+        g_hudWanted.store(settings.enabled, std::memory_order_relaxed);
         return;
     }
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
     g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
+}
+
+/** Applies a pending HUD state from the renderer thread. */
+void sync_hud() noexcept {
+    const bool wanted = g_hudWanted.load(std::memory_order_relaxed);
+    if (g_hudApplied.load(std::memory_order_relaxed) == wanted) {
+        return;
+    }
+    client::photo::set_hud_hidden(wanted);
+    g_hudApplied.store(wanted, std::memory_order_relaxed);
 }
 
 /** @return True when the local player's skinned draws must be skipped. */
@@ -507,11 +514,9 @@ void reset() noexcept {
     }
     // The hide switch is now off, so this restores every patched part flag.
     update_part_flags();
-    // Hand the HUD back to the game's live state before the hooks leave.
-    if (g_hudHidden.load(std::memory_order_relaxed)) {
-        client::photo::set_hud_hidden(false);
-        g_hudHidden.store(false, std::memory_order_relaxed);
-    }
+    // The game is shutting down, so the HUD state does not need handing back.
+    g_hudWanted.store(false, std::memory_order_relaxed);
+    g_hudApplied.store(false, std::memory_order_relaxed);
 }
 
 } // namespace sunrise::client::hooks::photo

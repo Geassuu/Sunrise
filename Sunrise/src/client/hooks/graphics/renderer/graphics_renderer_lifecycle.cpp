@@ -317,6 +317,8 @@ void present(IDXGISwapChain* swapChain) noexcept {
     if (g_resources.swapChain == swapChain && fully_active_locked()) {
         // The capture runs before the overlay draws, so the photo holds only the game frame.
         photo::try_capture(swapChain, g_resources.device, g_resources.context);
+        // The HUD lifetime push shares this thread with the Activity Host window.
+        photo::sync_hud();
         render_frame_locked();
         framed = true;
     }
