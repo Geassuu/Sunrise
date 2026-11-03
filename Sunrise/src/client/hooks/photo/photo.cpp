@@ -104,6 +104,11 @@ std::atomic_bool g_detached{false};
 bool g_freecamInitialized{false};
 teleport::Vector g_freecamPosition{};
 std::uint64_t g_lastDriveTick{0};
+/** The staged pose the renderer thread writes before the frame draws. */
+SRWLOCK g_freecamPublishLock{SRWLOCK_INIT};
+teleport::Vector g_freecamPublishPosition{};
+std::uint32_t g_freecamPublishPlayerIndex{kInvalidHandle};
+bool g_freecamPublishValid{false};
 /** The HUD state the camera thread wants; the renderer thread applies it. */
 std::atomic_bool g_hudWanted{false};
 /** The HUD state already applied, so the push happens once per switch. */
@@ -399,6 +404,9 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     if (!detached) {
         g_detached.store(false, std::memory_order_relaxed);
         g_freecamInitialized = false;
+        AcquireSRWLockExclusive(&g_freecamPublishLock);
+        g_freecamPublishValid = false;
+        ReleaseSRWLockExclusive(&g_freecamPublishLock);
         return;
     }
     g_detached.store(true, std::memory_order_relaxed);
@@ -422,7 +430,28 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     for (std::size_t lane = 0; lane < teleport::kVectorLanes; ++lane) {
         g_freecamPosition[lane] += velocity[lane] * delta;
     }
-    (void)teleport::write_camera_position(playerIndex, g_freecamPosition);
+    // Stage the pose for the renderer thread; the write itself happens before the draw.
+    AcquireSRWLockExclusive(&g_freecamPublishLock);
+    g_freecamPublishPosition = g_freecamPosition;
+    g_freecamPublishPlayerIndex = playerIndex;
+    g_freecamPublishValid = true;
+    ReleaseSRWLockExclusive(&g_freecamPublishLock);
+}
+
+/** Writes the staged free-camera position right before the frame draws. */
+void drive_camera_present() noexcept {
+    if (!g_detached.load(std::memory_order_relaxed)) {
+        return;
+    }
+    AcquireSRWLockShared(&g_freecamPublishLock);
+    const bool valid = g_freecamPublishValid;
+    const teleport::Vector position = g_freecamPublishPosition;
+    const std::uint32_t playerIndex = g_freecamPublishPlayerIndex;
+    ReleaseSRWLockShared(&g_freecamPublishLock);
+    if (!valid) {
+        return;
+    }
+    (void)teleport::write_camera_position(playerIndex, position);
 }
 
 /** Sets the velocity the coming simulation step integrates. */

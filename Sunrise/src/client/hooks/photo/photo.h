@@ -51,10 +51,17 @@ void apply(void* component) noexcept;
 
 /**
  * Drives the detached camera. Called from the camera-frame hook after the game computes its
- * own pose: the accumulated free-camera position overwrites the block the renderer reads.
+ * own pose: the accumulated free-camera position is staged for the renderer.
  * @param playerIndex Player whose camera block is written.
  */
 void drive_camera(std::uint32_t playerIndex) noexcept;
+
+/**
+ * Writes the staged free-camera position into the pose block. Called from the Present hook
+ * right before the game renders, so every game camera pass this frame has already run and
+ * nothing can snap the camera back to the player before the frame is drawn.
+ */
+void drive_camera_present() noexcept;
 
 /**
  * Applies a pending HUD state. Called every frame from the renderer thread, the same thread
