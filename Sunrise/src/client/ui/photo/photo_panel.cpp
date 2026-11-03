@@ -208,6 +208,13 @@ void draw() noexcept {
         core::ui::components::toggle::control("Hide player##photo", settings.hidePlayer) || changed;
 
     ImGui::Spacing();
+    changed =
+        core::ui::components::toggle::control("Detached camera##photo", settings.detached) || changed;
+    if (settings.detached) {
+        ImGui::TextDisabled("The camera flies free; the player stands still.");
+    }
+
+    ImGui::Spacing();
     ImGui::Spacing();
     ImGui::TextUnformatted("Photos");
     ImGui::Separator();

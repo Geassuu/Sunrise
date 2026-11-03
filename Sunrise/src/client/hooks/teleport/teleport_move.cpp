@@ -505,4 +505,26 @@ bool camera_pose(CameraPose& pose) noexcept {
     return valid;
 }
 
+/** Writes the camera position the renderer consumes this frame. */
+bool write_camera_position(std::uint32_t playerIndex, const Vector& position) noexcept {
+    AcquireSRWLockShared(&g_cameraPoseLock);
+    const auto target = g_cameraSingleton;
+    ReleaseSRWLockShared(&g_cameraPoseLock);
+    if (playerIndex == kInvalidHandle || target == nullptr) {
+        return false;
+    }
+    std::byte* const camera = target();
+    if (camera == nullptr) {
+        return false;
+    }
+    // Direct write like the physics lanes: the game reads this block every frame, so the photo
+    // free camera overwrites the position the game just computed, and the renderer sees ours.
+    float* const lane =
+        reinterpret_cast<float*>(camera + kCameraBlockStride * playerIndex + kCameraPositionX);
+    lane[0] = position[0];
+    lane[1] = position[1];
+    lane[2] = position[2];
+    return true;
+}
+
 } // namespace sunrise::client::hooks::teleport

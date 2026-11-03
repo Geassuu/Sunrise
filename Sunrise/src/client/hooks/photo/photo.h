@@ -46,6 +46,16 @@ void apply(void* component) noexcept;
 /** @return True while the free camera is on. */
 [[nodiscard]] bool enabled() noexcept;
 
+/** @return True while the detached camera owns the view instead of the player position. */
+[[nodiscard]] bool detached_active() noexcept;
+
+/**
+ * Drives the detached camera. Called from the camera-frame hook after the game computes its
+ * own pose: the accumulated free-camera position overwrites the block the renderer reads.
+ * @param playerIndex Player whose camera block is written.
+ */
+void drive_camera(std::uint32_t playerIndex) noexcept;
+
 /**
  * Sets the velocity the coming simulation step integrates.
  * @param body Character rigid body. Live only inside the step hook.

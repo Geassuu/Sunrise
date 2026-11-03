@@ -187,6 +187,9 @@ void parse(std::string_view text, Settings& output) noexcept {
     if (scalar_for(text, "\"hide_player\"", scalar)) {
         output.hidePlayer = scalar.starts_with("true");
     }
+    if (scalar_for(text, "\"detached\"", scalar)) {
+        output.detached = scalar.starts_with("true");
+    }
     if (scalar_for(text, "\"output_path\"", scalar)) {
         // A malformed string keeps the default folder rather than refusing the whole file.
         std::array<char, kPathCapacity> path{};
@@ -237,12 +240,14 @@ encode_string(const char* path, std::array<char, kFileCapacity>& output) noexcep
                                    document.size(),
                                    "{\n  \"enabled\": %s,\n  \"toggle_key\": %u,\n"
                                    "  \"shutter_key\": %u,\n  \"speed\": %.3f,\n"
-                                   "  \"hide_player\": %s,\n  \"output_path\": %s\n}\n",
+                                   "  \"hide_player\": %s,\n  \"detached\": %s,\n"
+                                   "  \"output_path\": %s\n}\n",
                                    settings.enabled ? "true" : "false",
                                    static_cast<unsigned>(settings.toggleKey),
                                    static_cast<unsigned>(settings.shutterKey),
                                    static_cast<double>(settings.speed),
                                    settings.hidePlayer ? "true" : "false",
+                                   settings.detached ? "true" : "false",
                                    escaped.data());
     if (size <= 0) {
         return false;

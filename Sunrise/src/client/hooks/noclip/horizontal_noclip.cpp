@@ -308,7 +308,8 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
     std::array<float, kVectorLanes> nativePosition{};
     const bool enabledBeforeStep = poll_toggle();
     const bool flying = fly::enabled();
-    const bool photoing = photo::enabled();
+    // The detached camera owns the view and the movement keys, so the body stays untouched.
+    const bool photoing = photo::enabled() && !photo::detached_active();
     std::byte* const before =
         (enabledBeforeStep || flying || photoing) ? player_body(simulation) : nullptr;
     // Fly writes first, so the velocity read below is the one it asked for.

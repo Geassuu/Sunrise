@@ -27,6 +27,7 @@
 #include "../../../state/runtime/runtime.h"
 #include "../../input/window_focus.h"
 #include "../../photo/photo_settings_store.h"
+#include "../../photo/photo_hud.h"
 #include "../noclip/runtime.h"
 #include "../teleport/runtime.h"
 #include "../world_objects/internal.h"
@@ -98,6 +99,13 @@ std::array<char, client::photo::kPathCapacity> g_openFolder{};
 std::atomic_bool g_openPending{false};
 /** Cached per frame on the camera thread, so the per-draw hide test takes no store lock. */
 std::atomic_bool g_hideActive{false};
+/** Detached-camera state; written by the camera hook, read by the physics hooks. */
+std::atomic_bool g_detached{false};
+bool g_freecamInitialized{false};
+teleport::Vector g_freecamPosition{};
+std::uint64_t g_lastDriveTick{0};
+/** Whether the HUD-hidden lifetime state is applied, so the push happens once per switch. */
+std::atomic_bool g_hudHidden{false};
 
 /**
  * Takes the account's movement bindings once they are loaded.
@@ -356,7 +364,7 @@ void dispatch_open_folder() noexcept {
 /** Writes the player's velocity on the physics sync, which publishes it. */
 void apply(void* component) noexcept {
     const client::photo::Settings settings = client::photo::get();
-    if (!settings.enabled) {
+    if (!settings.enabled || settings.detached) {
         return;
     }
     if (component == nullptr || !teleport::owns_local_player(component)) {
@@ -377,12 +385,54 @@ bool enabled() noexcept {
     return client::photo::get().enabled;
 }
 
+/** @return True while the detached camera owns the view instead of the player position. */
+bool detached_active() noexcept {
+    return g_detached.load(std::memory_order_relaxed);
+}
+
+/** Drives the detached camera from the camera-frame hook. */
+void drive_camera(std::uint32_t playerIndex) noexcept {
+    const client::photo::Settings settings = client::photo::get();
+    const bool detached = settings.enabled && settings.detached;
+    if (!detached) {
+        g_detached.store(false, std::memory_order_relaxed);
+        g_freecamInitialized = false;
+        return;
+    }
+    g_detached.store(true, std::memory_order_relaxed);
+    teleport::CameraPose pose{};
+    if (!teleport::camera_pose(pose)) {
+        return;
+    }
+    if (!g_freecamInitialized) {
+        g_freecamPosition = pose.position;
+        g_freecamInitialized = true;
+    }
+    const std::uint64_t now = GetTickCount64();
+    float delta = 0.016F;
+    if (g_lastDriveTick != 0) {
+        delta = (std::min)(0.1F, static_cast<float>(now - g_lastDriveTick) / 1000.0F);
+    }
+    g_lastDriveTick = now;
+    // The keys move the camera in the frame the game just computed; mouse look stays the
+    // game's own, so the detached camera flies and turns while the player stands still.
+    const teleport::Vector velocity = desired_velocity(settings.speed);
+    for (std::size_t lane = 0; lane < teleport::kVectorLanes; ++lane) {
+        g_freecamPosition[lane] += velocity[lane] * delta;
+    }
+    (void)teleport::write_camera_position(playerIndex, g_freecamPosition);
+}
+
 /** Sets the velocity the coming simulation step integrates. */
 void before_step(void* body) noexcept {
     if (body == nullptr || !read_bindings()) {
         return;
     }
-    noclip::write_body_velocity(body, desired_velocity(client::photo::get().speed));
+    const client::photo::Settings settings = client::photo::get();
+    if (!settings.enabled || settings.detached) {
+        return;
+    }
+    noclip::write_body_velocity(body, desired_velocity(settings.speed));
 }
 
 /** Refreshes the cached local-player object handle and the hide switch. */
@@ -409,6 +459,13 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(handle, std::memory_order_release);
         g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
         update_part_flags();
+        // The HUD policy follows the photo switch: lifetime state 1 hides the game HUD, and
+        // state 3 is the live default. Applied once per change.
+        const bool wantHudHidden = settings.enabled;
+        if (g_hudHidden.load(std::memory_order_relaxed) != wantHudHidden) {
+            client::photo::set_hud_hidden(wantHudHidden);
+            g_hudHidden.store(wantHudHidden, std::memory_order_relaxed);
+        }
         return;
     }
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
@@ -442,11 +499,19 @@ void reset() noexcept {
     g_poolStrideSlot.store(0, std::memory_order_relaxed);
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
     g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
+    g_detached.store(false, std::memory_order_relaxed);
+    g_freecamInitialized = false;
+    g_lastDriveTick = 0;
     for (std::atomic<std::uint32_t>& slot : g_playerModels) {
         slot.store(0, std::memory_order_relaxed);
     }
     // The hide switch is now off, so this restores every patched part flag.
     update_part_flags();
+    // Hand the HUD back to the game's live state before the hooks leave.
+    if (g_hudHidden.load(std::memory_order_relaxed)) {
+        client::photo::set_hud_hidden(false);
+        g_hudHidden.store(false, std::memory_order_relaxed);
+    }
 }
 
 } // namespace sunrise::client::hooks::photo

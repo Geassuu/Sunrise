@@ -140,4 +140,14 @@ void apply_pending(void* component) noexcept;
 /** Copies the last complete pose published by the camera-frame hook. */
 [[nodiscard]] bool camera_pose(CameraPose& pose) noexcept;
 
+/**
+ * Writes the camera position the renderer consumes this frame. Photo mode's detached camera
+ * drives the view without moving the player; the game rebuilds the pose every frame, so the
+ * write lands after the game's own camera update, from the same hook that publishes it.
+ * @param playerIndex Player whose camera block is written.
+ * @param position World-space position to store.
+ * @return True when the block was found and written.
+ */
+[[nodiscard]] bool write_camera_position(std::uint32_t playerIndex, const Vector& position) noexcept;
+
 } // namespace sunrise::client::hooks::teleport

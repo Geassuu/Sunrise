@@ -86,6 +86,8 @@ std::int64_t __fastcall camera_transform(std::uint32_t playerIndex) noexcept {
     const CameraTransform next = original<CameraTransform>(kCameraSlot);
     const std::int64_t result = next != nullptr ? next(playerIndex) : 0;
     capture_camera_pose(playerIndex);
+    // The detached camera overwrites the position the game just computed, after the capture.
+    hooks::photo::drive_camera(playerIndex);
     poll_request();
     force_pending();
     // Read here, not on the physics tick: that tick stops for a player who is standing still.

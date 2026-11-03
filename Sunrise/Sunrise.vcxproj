@@ -297,6 +297,7 @@
     <ClCompile Include="src\client\ui\photo\photo_panel.cpp" />
     <ClCompile Include="src\client\movement\movement_settings_store.cpp" />
     <ClCompile Include="src\client\photo\photo_settings_store.cpp" />
+    <ClCompile Include="src\client\photo\photo_hud.cpp" />
     <ClCompile Include="src\client\hooks\inactivity\inactivity_override.cpp" />
     <ClCompile Include="src\client\ui\player\player_panel.cpp" />
     <ClCompile Include="src\client\player\player_position.cpp" />
@@ -1466,6 +1467,7 @@
     <ClInclude Include="src\client\runtime\runtime.h" />
     <ClInclude Include="src\client\movement\movement_settings_store.h" />
     <ClInclude Include="src\client\photo\photo_settings_store.h" />
+    <ClInclude Include="src\client\photo\photo_hud.h" />
     <ClInclude Include="src\client\hooks\async_io\async_io_lifetime_guard.h" />
     <ClInclude Include="src\client\hooks\inactivity\inactivity_override.h" />
     <ClInclude Include="src\client\ui\player\player_panel.h" />

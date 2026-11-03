@@ -27,6 +27,8 @@ struct Settings {
     float speed{kDefaultSpeed};
     /** Skips the local player's skinned draws while the mode is on. */
     bool hidePlayer{true};
+    /** Detaches the camera from the player; the keys fly the view while the player stands. */
+    bool detached{false};
     /** Output folder, UTF-8. Empty means the default `Sunrise\photos` folder. */
     std::array<char, kPathCapacity> outputPath{};
 };
