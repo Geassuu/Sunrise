@@ -24,6 +24,7 @@
 #include "../../../core/logging/log.h"
 #include "../../../core/ui/runtime/ui_visibility_runtime.h"
 #include "../../../state/account/account_state.h"
+#include "../../../state/runtime/runtime.h"
 #include "../../input/window_focus.h"
 #include "../../photo/photo_settings_store.h"
 #include "../noclip/runtime.h"

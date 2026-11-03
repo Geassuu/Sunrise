@@ -25,6 +25,11 @@
 #include "../../photo/photo_settings_store.h"
 #include "internal.h"
 
+// The D3D headers come last: their `interface` macro corrupts the account headers the settings
+// store chain pulls in above. This translation unit alone carries the full capture types.
+#include <d3d11.h>
+#include <dxgi.h>
+
 namespace sunrise::client::hooks::photo {
 namespace {
 
@@ -341,8 +346,8 @@ void try_capture(IDXGISwapChain* swapChain,
         report_fail("path");
         return;
     }
-    FILE* file = _wfopen(extended.c_str(), L"wb");
-    if (file == nullptr) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, extended.c_str(), L"wb") != 0 || file == nullptr) {
         report_fail("open");
         return;
     }

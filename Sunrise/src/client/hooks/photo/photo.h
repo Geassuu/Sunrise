@@ -1,9 +1,14 @@
 #pragma once
 
 #include <cstdint>
-#include <d3d11.h>
-#include <dxgi.h>
 #include <string_view>
+
+// Forward-declared so this header stays free of the D3D headers, whose `interface` macro
+// corrupts any account header included after them. The capture implementation includes the
+// full definitions in its own translation unit.
+struct IDXGISwapChain;
+struct ID3D11Device;
+struct ID3D11DeviceContext;
 
 namespace sunrise::client::hooks::photo {
 
