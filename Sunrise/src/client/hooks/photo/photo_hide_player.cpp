@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -38,6 +39,15 @@ constexpr std::string_view kProducerText =
 /** Compiled pattern bytes of the producer signature. */
 constexpr auto kProducer =
     patterns::signature<patterns::signature_length(kProducerText)>(kProducerText);
+/** The producer's first handle decode, ending in its load of the handle-table slot. */
+constexpr std::string_view kTablesLoadText =
+    "8B 54 24 68 33 F6 83 FA FF 0F 84 ? ? ? ? 48 8B 5C 24 70 8B C2 C1 F8 0D 81 E2 FF 1F 00 00 "
+    "8B C8 48 81 C9 00 00 FC 0F 0F B7 C0 48 C1 E9 12 48 23 C8 48 8B 05 ? ? ? ?";
+/** Compiled pattern bytes of the tables-load signature. */
+constexpr auto kTablesLoad =
+    patterns::signature<patterns::signature_length(kTablesLoadText)>(kTablesLoadText);
+/** The tables load's operand occupies bytes 53..56. */
+constexpr std::size_t kTablesOperand = 53, kTablesNext = 57;
 
 /** The draw record's owner handle sits four bytes in, the same read the Studio observer makes. */
 constexpr std::size_t kDrawOwnerOffset = sizeof(std::uint32_t);
@@ -52,17 +62,49 @@ constexpr std::uint32_t kSlotMask = 0x1FFFU;
 /** A parent chain longer than this is treated as unreadable; it guards against a cycle. */
 constexpr std::size_t kMaximumAncestors = 8;
 
+/** Runtime table rows link components and store their body displacement. Studio's own layout. */
+struct RuntimeTable final {
+    std::uintptr_t unused{}, rows{}, pool{};
+    std::array<std::byte, 24> reserved{};
+    std::uint32_t stride{};
+    std::int32_t correctionMask{};
+    std::uint64_t tail{};
+};
+/** One runtime component entry, as the Studio pose capture reads it. */
+struct ComponentEntry final {
+    std::uint64_t prefix{}, correction{};
+    std::uint32_t opaque16{}, next{};
+};
+/** The head of one component record; its owner links the component to its object. */
+struct ComponentPrefix final {
+    std::array<std::byte, 36> prefix{};
+    std::uint32_t self{}, reserved{}, owner{};
+};
+static_assert(sizeof(RuntimeTable) == 64);
+static_assert(offsetof(RuntimeTable, stride) == 48);
+static_assert(sizeof(ComponentEntry) == 24);
+static_assert(offsetof(ComponentPrefix, owner) == 44);
+/** Handle table selection uses ten bits, extended to fourteen by the sign bit. */
+constexpr std::uint32_t kHandleSignBit = 0x80000000U, kRuntimeTableMask = 0x3FFU,
+                       kExtendedTableMask = 0x3FFF;
+/** The sign bit's selector shift, the same decode the Studio capture uses. */
+constexpr std::uint32_t kHandleIndexShift = 13;
+
 using Producer = char(__fastcall*)(std::uintptr_t, void*, std::uintptr_t, void*, void*, int);
 
 std::atomic_bool g_installed{false};
 hooking::detour::Handle g_hideHandle{};
+/** The handle-table storage slot the tables-load decodes; zero while unresolved. */
+std::atomic<std::uintptr_t> g_tablesSlot{0};
 
 /** Diagnostic counters, reset by each report line. */
 std::atomic<std::uint64_t> g_seen{0};
 std::atomic<std::uint64_t> g_hidden{0};
 std::atomic<std::uint64_t> g_lastReport{0};
-/** Distinct owners matched by the parent rule, so the report stays one line per object. */
+/** Distinct owners matched by a hide rule, one line per rule. */
 std::array<std::atomic<std::uint64_t>, 16> g_parentMatches{};
+/** Distinct owners no rule hides, so the missing links reach the log once each. */
+std::array<std::atomic<std::uint64_t>, 48> g_skips{};
 /** How often the counter line repeats while the hide is on. */
 constexpr std::uint64_t kReportIntervalMs = 5000;
 
@@ -71,6 +113,7 @@ enum class Match : std::uint32_t {
     none = 0,
     player = 1,
     parent = 2,
+    component = 3,
 };
 
 /**
@@ -113,6 +156,57 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
 }
 
 /**
+ * Resolves the object a component belongs to through the runtime component tables.
+ * The class-item cloth can keep its component on the player's entity while its own datum hangs
+ * off elsewhere, so the component owner is the one link the parent chain misses.
+ * @param component Component handle from a draw record.
+ * @return The owning object handle, or kInvalidHandle when the tables cannot be read.
+ */
+[[nodiscard]] std::uint32_t component_owner(std::uint32_t component) noexcept {
+    if (component == kInvalidHandle) {
+        return kInvalidHandle;
+    }
+    const std::uintptr_t slot = g_tablesSlot.load(std::memory_order_relaxed);
+    if (slot == 0) {
+        return kInvalidHandle;
+    }
+    std::uintptr_t object = 0;
+    std::uintptr_t tables = 0;
+    if (!read(slot, object) || !read(object, tables) || tables == 0) {
+        return kInvalidHandle;
+    }
+    const auto index =
+        (component >> kHandleIndexShift)
+        & ((component & kHandleSignBit) != 0 ? kExtendedTableMask : kRuntimeTableMask);
+    if (tables > (std::numeric_limits<std::uintptr_t>::max)() - sizeof(RuntimeTable) * index) {
+        return kInvalidHandle;
+    }
+    RuntimeTable table{};
+    if (!read(tables + sizeof(RuntimeTable) * index, table) || table.rows == 0
+        || table.stride < sizeof(ComponentEntry)) {
+        return kInvalidHandle;
+    }
+    const auto offset = std::uint64_t(table.stride) * (component & kSlotMask);
+    if (offset > (std::numeric_limits<std::uint32_t>::max)()
+        || table.rows > (std::numeric_limits<std::uintptr_t>::max)() - offset) {
+        return kInvalidHandle;
+    }
+    const std::uintptr_t entry = table.rows + static_cast<std::uintptr_t>(offset);
+    ComponentEntry node{};
+    if (!read(entry, node)) {
+        return kInvalidHandle;
+    }
+    const auto mask =
+        static_cast<std::uint64_t>(static_cast<std::int64_t>(table.correctionMask));
+    const std::uintptr_t base = entry - static_cast<std::uintptr_t>(node.correction & mask);
+    ComponentPrefix prefix{};
+    if (!read(base, prefix) || prefix.self != component) {
+        return kInvalidHandle;
+    }
+    return prefix.owner;
+}
+
+/**
  * Tests one draw owner against the local player. The match set is the player object and its
  * parent: the first-person weapon hangs off the player's chain, while entity-level attachments
  * like the class-item cloth can hang off the player's parent as a sibling object.
@@ -150,17 +244,91 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
     return Match::none;
 }
 
-/** Logs the owner once, the first time the parent rule hides it. */
-void report_parent_match(std::uint32_t owner) noexcept {
+/**
+ * Tests one draw record against the local player. The chain test covers the player object, its
+ * children (the weapon) and its siblings (entity-level attachments); the component test covers
+ * objects that keep their component on the player's entity while their datum hangs elsewhere.
+ * @param draw Draw record address; its first field is the component handle.
+ * @param owner Draw owner handle to test.
+ * @return What the draw matched, or Match::none.
+ */
+[[nodiscard]] Match match_for(std::uintptr_t draw, std::uint32_t owner) noexcept {
+    const Match chain = match_kind(owner);
+    if (chain != Match::none) {
+        return chain;
+    }
+    const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
+    if (player == kInvalidHandle) {
+        return Match::none;
+    }
+    const std::uint32_t playerParent = g_playerParent.load(std::memory_order_relaxed);
+    std::uint32_t component = kInvalidHandle;
+    if (!read(draw, component)) {
+        return Match::none;
+    }
+    const std::uint32_t ownerOf = component_owner(component);
+    if (ownerOf == kInvalidHandle) {
+        return Match::none;
+    }
+    if (ownerOf == player || (playerParent != kInvalidHandle && ownerOf == playerParent)) {
+        return Match::component;
+    }
+    return Match::none;
+}
+
+/** Logs one owner the first time a rule hides it, one line per rule. */
+void report_match(std::uint32_t owner, Match kind) noexcept {
     const std::uint64_t entry =
-        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(Match::parent);
+        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(kind);
     for (std::atomic<std::uint64_t>& slot : g_parentMatches) {
         std::uint64_t expected = 0;
         if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
             std::array<char, 96> line{};
-            const int written = std::snprintf(
-                line.data(), line.size(), "ev=photo stage=hide_parent owner=0x%08X",
-                static_cast<unsigned>(owner));
+            const int written =
+                std::snprintf(line.data(),
+                              line.size(),
+                              "ev=photo stage=hide_match owner=0x%08X kind=%u",
+                              static_cast<unsigned>(owner),
+                              static_cast<unsigned>(kind));
+            if (written > 0) {
+                core::log::write(core::log::Channel::client,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+            }
+            return;
+        }
+        if (expected == entry) {
+            return;
+        }
+    }
+}
+
+/** Logs one draw that no rule hides, once per owner, with the links that rule needs next. */
+void report_skip(std::uintptr_t draw, std::uint32_t owner) noexcept {
+    const std::uint64_t entry =
+        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(Match::none);
+    for (std::atomic<std::uint64_t>& slot : g_skips) {
+        std::uint64_t expected = 0;
+        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
+            std::uintptr_t base = 0;
+            std::uint32_t stride = 0;
+            const std::uint32_t parent =
+                pool(base, stride) ? parent_of(owner, base, stride) : kInvalidHandle;
+            std::uint32_t component = kInvalidHandle;
+            const std::uint32_t ownerOf =
+                read(draw, component) ? component_owner(component) : kInvalidHandle;
+            std::uint32_t model = 0;
+            (void)read(draw + sizeof(std::uint64_t), model);
+            std::array<char, 160> line{};
+            const int written =
+                std::snprintf(line.data(),
+                              line.size(),
+                              "ev=photo stage=hide_skip owner=0x%08X parent=0x%08X "
+                              "comp_owner=0x%08X model=0x%08X",
+                              static_cast<unsigned>(owner),
+                              static_cast<unsigned>(parent),
+                              static_cast<unsigned>(ownerOf),
+                              static_cast<unsigned>(model));
             if (written > 0) {
                 core::log::write(core::log::Channel::client,
                                  core::log::Level::warn,
@@ -211,15 +379,14 @@ char __fastcall hide_body(std::uintptr_t draw,
         std::uint32_t owner = kInvalidHandle;
         if (read(draw + kDrawOwnerOffset, owner)) {
             g_seen.fetch_add(1, std::memory_order_relaxed);
-            const Match kind = match_kind(owner);
+            const Match kind = match_for(draw, owner);
             if (kind != Match::none) {
                 g_hidden.fetch_add(1, std::memory_order_relaxed);
-                if (kind == Match::parent) {
-                    report_parent_match(owner);
-                }
+                report_match(owner, kind);
                 // Zero tells the caller nothing was produced, which drops the draw from the frame.
                 return 0;
             }
+            report_skip(draw, owner);
             report_counters();
         }
     }
@@ -268,6 +435,18 @@ bool install() noexcept {
             hooking::detour::Spec{producer, reinterpret_cast<void*>(&hide_body)}, g_hideHandle)) {
         report_install_failure("attach");
         return false;
+    }
+    // The component tables extend the hide to draws whose owner chain is disconnected from the
+    // player. A miss only narrows the hide to the chain rules, so it is logged, not fatal.
+    std::byte* const tables =
+        patterns::scan_main_image_unique(kTablesLoad, "photo_hide_tables");
+    if (tables != nullptr) {
+        g_tablesSlot.store(
+            reinterpret_cast<std::uintptr_t>(patterns::resolve_relative(tables + kTablesOperand,
+                                                                        tables + kTablesNext)),
+            std::memory_order_release);
+    } else {
+        report_install_failure("tables");
     }
     g_installed.store(true, std::memory_order_release);
     g_hideInstalled.store(true, std::memory_order_release);
