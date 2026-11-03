@@ -329,53 +329,180 @@ std::uint32_t datum_parent(std::uint32_t handle) noexcept {
     return parent_of(handle, base, stride);
 }
 
-/** Logs one line of 16 hex words. */
-void log_words(const char* stage, const std::uint32_t* words) noexcept {
-    std::array<char, 256> line{};
-    std::size_t used = 0;
-    used += static_cast<std::size_t>(
-        std::snprintf(line.data(), line.size(), "ev=photo stage=%s", stage));
-    for (std::size_t i = 0; i < 16 && used + 10 < line.size(); ++i) {
-        used += static_cast<std::size_t>(std::snprintf(
-            line.data() + used, line.size() - used, " %08X", static_cast<unsigned>(words[i])));
-    }
-    core::log::write(
-        core::log::Channel::client, core::log::Level::warn, {line.data(), used});
+namespace {
+
+/** One backed-up part-flag word, restored when the hide turns off. */
+struct FlagPatch final {
+    std::uintptr_t address{};
+    std::uint16_t original{};
+};
+
+/** One authored part row, read from the model record. */
+struct PartRow final {
+    std::uint32_t material{};
+    std::uint32_t first{};
+    std::uint32_t count{};
+    std::int16_t logical{-1};
+    std::uint16_t flags{};
+    std::uint8_t lod{};
+};
+
+/** Camera-thread state; refresh_player_handle is the only writer. */
+std::array<FlagPatch, 512> g_flagPatches{};
+std::size_t g_flagPatchCount{};
+bool g_flagsPatched{false};
+std::array<std::uint32_t, 16> g_patchedModels{};
+std::size_t g_patchedModelCount{};
+
+/** @param p Part row address. @return True when every field was read. */
+[[nodiscard]] bool read_part_row(std::uintptr_t p, PartRow& row) noexcept {
+    return read(p, row.material) && read(p + 8, row.first) && read(p + 0xC, row.count)
+           && read(p + 0x14, row.logical) && read(p + 0x18, row.flags) && read(p + 0x1B, row.lod);
 }
 
-/** Read-only probe: resolves each collected player model and logs its record layout. */
-void probe_player_models() noexcept {
-    if (!hide_player_active()) {
+/** @param row Read part row. @return True when its fields fit the authored layout. */
+[[nodiscard]] bool plausible_part_row(const PartRow& row) noexcept {
+    return row.material != 0 && row.material != 0xFFFFFFFFU
+           && (row.material & 0x80000000U) != 0 && row.logical >= 0 && row.logical < 64
+           && (row.flags & ~0xFFU) == 0 && row.lod <= 7 && row.first <= 0x1000000
+           && row.count > 0 && row.count <= 0x400000;
+}
+
+/**
+ * Finds the part table in one model record by its LOD chain: two consecutive 0x20 rows with the
+ * same material, a rising LOD byte and a continuing index range. The runtime record is flat, so
+ * the table sits at a per-model offset after the mesh data.
+ * @param model Model record address.
+ * @param table Receives the first part row address.
+ * @return The number of plausible rows, or zero when no chain matched.
+ */
+[[nodiscard]] std::size_t find_part_table(std::uintptr_t model, std::uintptr_t& table) noexcept {
+    for (std::uint32_t offset = 0x100; offset < 0x500; offset += 4) {
+        const std::uintptr_t first = model + offset;
+        PartRow a{};
+        PartRow b{};
+        if (!read_part_row(first, a) || !plausible_part_row(a)) {
+            continue;
+        }
+        if (!read_part_row(first + 0x20, b) || !plausible_part_row(b)) {
+            continue;
+        }
+        if (b.material != a.material || b.lod <= a.lod) {
+            continue;
+        }
+        const std::uint32_t chainEnd = a.first + a.count;
+        if (b.first < chainEnd || b.first > chainEnd + 4) {
+            continue;
+        }
+        std::size_t rows = 2;
+        for (std::size_t extra = 2; extra < 64; ++extra) {
+            PartRow next{};
+            if (!read_part_row(first + extra * 0x20, next) || !plausible_part_row(next)) {
+                break;
+            }
+            ++rows;
+        }
+        table = first;
+        return rows;
+    }
+    return 0;
+}
+
+/** Sets the 0x40 hidden-part flag on every row of one model's part table. */
+void patch_model_parts(std::size_t rows, std::uintptr_t table) noexcept {
+    const std::size_t span = rows * 0x20;
+    DWORD oldProtect = 0;
+    if (VirtualProtect(reinterpret_cast<void*>(table),
+                       static_cast<SIZE_T>(span),
+                       PAGE_READWRITE,
+                       &oldProtect)
+        == FALSE) {
         return;
     }
-    // Only the camera thread runs this, so plain static state is safe.
-    static std::array<std::uint32_t, 16> reported{};
-    static std::size_t reportedCount = 0;
+    for (std::size_t row = 0; row < rows; ++row) {
+        if (g_flagPatchCount >= g_flagPatches.size()) {
+            break;
+        }
+        const std::uintptr_t flags = table + row * 0x20 + 0x18;
+        std::uint16_t current = 0;
+        if (!read(flags, current)) {
+            continue;
+        }
+        g_flagPatches[g_flagPatchCount++] = FlagPatch{flags, current};
+        *reinterpret_cast<volatile std::uint16_t*>(flags) =
+            static_cast<std::uint16_t>(current | 0x40U);
+    }
+    (void)VirtualProtect(
+        reinterpret_cast<void*>(table), static_cast<SIZE_T>(span), oldProtect, &oldProtect);
+}
+
+/** Writes back every backed-up flag word. */
+void restore_part_flags() noexcept {
+    for (std::size_t i = 0; i < g_flagPatchCount; ++i) {
+        const std::uintptr_t flags = g_flagPatches[i].address;
+        DWORD oldProtect = 0;
+        if (VirtualProtect(reinterpret_cast<void*>(flags),
+                           sizeof(std::uint16_t),
+                           PAGE_READWRITE,
+                           &oldProtect)
+            != FALSE) {
+            *reinterpret_cast<volatile std::uint16_t*>(flags) = g_flagPatches[i].original;
+            (void)VirtualProtect(
+                reinterpret_cast<void*>(flags), sizeof(std::uint16_t), oldProtect, &oldProtect);
+        }
+    }
+    g_flagPatchCount = 0;
+    g_patchedModelCount = 0;
+    g_patchedModels = {};
+}
+
+} // namespace
+
+/**
+ * Applies or restores the part flags while the hide is on. When it turns on, every collected
+ * player model gets the 0x40 hidden-part flag on its part rows, which the game's own draw
+ * decision honors, cloth parts included. When it turns off, every original flag is restored.
+ */
+void update_part_flags() noexcept {
+    const bool want = hide_player_active();
+    if (want == g_flagsPatched) {
+        return;
+    }
+    if (!want) {
+        restore_part_flags();
+        g_flagsPatched = false;
+        return;
+    }
     const content::handles::Source source{
         g_tablesSlot.load(std::memory_order_relaxed), nullptr, &memory::copy_current_process};
     for (std::atomic<std::uint32_t>& slot : g_playerModels) {
-        const std::uint32_t modelHandle = slot.load(std::memory_order_relaxed);
-        if (modelHandle == 0 || modelHandle == kInvalidHandle) {
+        const std::uint32_t handle = slot.load(std::memory_order_relaxed);
+        if (handle == 0 || handle == kInvalidHandle) {
             continue;
         }
         bool known = false;
-        for (std::size_t i = 0; i < reportedCount; ++i) {
-            known = known || reported[i] == modelHandle;
+        for (std::size_t i = 0; i < g_patchedModelCount; ++i) {
+            known = known || g_patchedModels[i] == handle;
         }
         if (known) {
             continue;
         }
-        if (reportedCount < reported.size()) {
-            reported[reportedCount++] = modelHandle;
+        if (g_patchedModelCount < g_patchedModels.size()) {
+            g_patchedModels[g_patchedModelCount++] = handle;
         }
         std::uintptr_t model = 0;
-        if (!content::handles::resolve(source, modelHandle, model) || model == 0) {
+        if (!content::handles::resolve(source, handle, model) || model == 0) {
+            continue;
+        }
+        std::uintptr_t table = 0;
+        const std::size_t rows = find_part_table(model, table);
+        if (rows == 0) {
             std::array<char, 96> line{};
             const int written =
                 std::snprintf(line.data(),
                               line.size(),
-                              "ev=photo stage=probe_model model=0x%08X result=resolve_fail",
-                              static_cast<unsigned>(modelHandle));
+                              "ev=photo stage=part_flags model=0x%08X result=no_table",
+                              static_cast<unsigned>(handle));
             if (written > 0) {
                 core::log::write(core::log::Channel::client,
                                  core::log::Level::warn,
@@ -383,114 +510,22 @@ void probe_player_models() noexcept {
             }
             continue;
         }
-        std::array<char, 128> head{};
-        const int headWritten =
-            std::snprintf(head.data(),
-                          head.size(),
-                          "ev=photo stage=probe_model model=0x%08X addr=0x%p",
-                          static_cast<unsigned>(modelHandle),
-                          reinterpret_cast<void*>(model));
-        if (headWritten > 0) {
+        patch_model_parts(rows, table);
+        std::array<char, 128> line{};
+        const int written =
+            std::snprintf(line.data(),
+                          line.size(),
+                          "ev=photo stage=part_flags model=0x%08X table=+0x%llX rows=%u",
+                          static_cast<unsigned>(handle),
+                          static_cast<unsigned long long>(table - model),
+                          static_cast<unsigned>(rows));
+        if (written > 0) {
             core::log::write(core::log::Channel::client,
                              core::log::Level::warn,
-                             {head.data(), static_cast<std::size_t>(headWritten)});
-        }
-        // The first 64 bytes of the runtime record, as two word lines.
-        std::array<std::uint32_t, 32> words{};
-        if (read(model, words)) {
-            log_words("probe_words0", words.data());
-            log_words("probe_words1", words.data() + 16);
-        }
-        // Part-table candidates: rows of 0x20 whose fields match the authored part row layout
-        // (material @0, variant @4, topology @6, first @8, count @0xC, logical @0x14,
-        // flags @0x18, dye @0x1A, lod @0x1B).
-        struct Candidate {
-            std::uint32_t offset{};
-            std::uint32_t score{};
-        };
-        std::array<Candidate, 3> best{};
-        for (std::uint32_t offset = 0; offset < 0x200; offset += 4) {
-            std::uint32_t score = 0;
-            bool plausible = true;
-            for (std::uint32_t row = 0; row < 4 && plausible; ++row) {
-                const std::uintptr_t p = model + offset + row * 0x20;
-                std::uint32_t material = 0, first = 0, count = 0;
-                std::int16_t variant = -1, logical = -1;
-                std::uint16_t flags = 0;
-                std::uint8_t lod = 0;
-                plausible = read(p, material) && read(p + 4, variant) && read(p + 8, first)
-                             && read(p + 0xC, count) && read(p + 0x14, logical)
-                             && read(p + 0x18, flags) && read(p + 0x1B, lod);
-                if (!plausible) {
-                    break;
-                }
-                if (variant >= -1 && variant < 64) {
-                    score += 1;
-                }
-                if (first <= 0x1000000) {
-                    score += 1;
-                }
-                if (count > 0 && count <= 0x400000) {
-                    score += 1;
-                }
-                if (logical >= 0 && logical < 512) {
-                    score += 2;
-                }
-                if ((flags & ~0x3FFU) == 0) {
-                    score += 2;
-                }
-                if (lod < 8) {
-                    score += 2;
-                }
-            }
-            if (!plausible) {
-                continue;
-            }
-            for (Candidate& candidate : best) {
-                if (score > candidate.score) {
-                    candidate = {offset, score};
-                    break;
-                }
-            }
-        }
-        for (const Candidate& candidate : best) {
-            if (candidate.score == 0) {
-                continue;
-            }
-            const std::uintptr_t p = model + candidate.offset;
-            std::uint32_t material = 0, first = 0, count = 0;
-            std::int16_t variant = -1, logical = -1;
-            std::uint16_t flags = 0;
-            std::uint8_t lod = 0;
-            (void)read(p, material);
-            (void)read(p + 4, variant);
-            (void)read(p + 8, first);
-            (void)read(p + 0xC, count);
-            (void)read(p + 0x14, logical);
-            (void)read(p + 0x18, flags);
-            (void)read(p + 0x1B, lod);
-            std::array<char, 200> line{};
-            const int written =
-                std::snprintf(line.data(),
-                              line.size(),
-                              "ev=photo stage=probe_parts +0x%X score=%u "
-                              "mat=0x%08X var=%d first=%u count=%u logical=%d flags=0x%X lod=%u",
-                              candidate.offset,
-                              static_cast<unsigned>(candidate.score),
-                              static_cast<unsigned>(material),
-                              static_cast<int>(variant),
-                              static_cast<unsigned>(first),
-                              static_cast<unsigned>(count),
-                              static_cast<int>(logical),
-                              static_cast<unsigned>(flags),
-                              static_cast<unsigned>(lod));
-            if (written > 0) {
-                core::log::write(core::log::Channel::client,
-                                 core::log::Level::warn,
-                                 {line.data(), static_cast<std::size_t>(written)});
-            }
+                             {line.data(), static_cast<std::size_t>(written)});
         }
     }
+    g_flagsPatched = true;
 }
 
 /** Resolves the producer and attaches the hide-player detour. */

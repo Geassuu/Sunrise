@@ -408,7 +408,7 @@ void refresh_player_handle() noexcept {
     if (teleport::controlled_handle(handle)) {
         g_playerHandle.store(handle, std::memory_order_release);
         g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
-        probe_player_models();
+        update_part_flags();
         return;
     }
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
@@ -445,6 +445,8 @@ void reset() noexcept {
     for (std::atomic<std::uint32_t>& slot : g_playerModels) {
         slot.store(0, std::memory_order_relaxed);
     }
+    // The hide switch is now off, so this restores every patched part flag.
+    update_part_flags();
 }
 
 } // namespace sunrise::client::hooks::photo

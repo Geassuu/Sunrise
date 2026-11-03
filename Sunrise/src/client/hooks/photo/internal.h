@@ -32,10 +32,10 @@ extern std::array<std::atomic<std::uint32_t>, 16> g_playerModels;
 [[nodiscard]] std::uint32_t datum_parent(std::uint32_t handle) noexcept;
 
 /**
- * Read-only probe: resolves every collected player model handle and logs the model record
- * layout, so the part table that carries the 0x40 hidden-part flag can be located. Logs each
- * model once. Runs on the camera thread, so its state needs no lock.
+ * Applies or restores the hidden-part flags while the hide is on. Runs on the camera thread
+ * from the per-frame refresh, so its state needs no lock. Restores everything when the hide
+ * turns off or the module resets.
  */
-void probe_player_models() noexcept;
+void update_part_flags() noexcept;
 
 } // namespace sunrise::client::hooks::photo
