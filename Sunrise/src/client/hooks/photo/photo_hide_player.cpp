@@ -17,13 +17,13 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <intrin.h>
 #include <limits>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
 #include "../../../core/logging/log.h"
+#include "../../content/handles/handle_resolver.h"
 #include "../../hooking/detour.h"
 #include "../../memory/current_process_memory.h"
 #include "../../patterns/image_scan.h"
@@ -31,6 +31,10 @@
 #include "internal.h"
 
 namespace sunrise::client::hooks::photo {
+
+/** Distinct model handles of the player's skinned draws, collected for the read-only probe. */
+std::array<std::atomic<std::uint32_t>, 16> g_playerModels{};
+
 namespace {
 
 /** The producer pattern the Studio pose link resolves; it matches one function per build. */
@@ -49,19 +53,6 @@ constexpr auto kTablesLoad =
     patterns::signature<patterns::signature_length(kTablesLoadText)>(kTablesLoadText);
 /** The tables load's operand occupies bytes 53..56. */
 constexpr std::size_t kTablesOperand = 53, kTablesNext = 57;
-
-/**
- * The record-resolve helper the no-pose-production path calls. The probe detour observes its
- * two link fields, rcx's low word ([object + 0x58]) and r8 ([object + 0x1c]), and reports the
- * ones whose call site is the path-A resolve inside the entity dispatcher.
- */
-constexpr std::string_view kResolveText =
-    "4C 8B 54 24 28 4C 8B DA 0F 28 05 ? ? ? ? 41 0F 11 02 4D 85 C9 0F 84 93 01 00 00";
-/** Compiled pattern bytes of the resolve-helper signature. */
-constexpr auto kResolve =
-    patterns::signature<patterns::signature_length(kResolveText)>(kResolveText);
-/** Image offset of the path-A call site inside the entity dispatcher. */
-constexpr std::uintptr_t kPathACallSiteOffset = 0x11ADE68;
 
 /** The draw record's owner handle sits four bytes in, the same read the Studio observer makes. */
 constexpr std::size_t kDrawOwnerOffset = sizeof(std::uint32_t);
@@ -105,80 +96,11 @@ constexpr std::uint32_t kHandleSignBit = 0x80000000U, kRuntimeTableMask = 0x3FFU
 constexpr std::uint32_t kHandleIndexShift = 13;
 
 using Producer = char(__fastcall*)(std::uintptr_t, void*, std::uintptr_t, void*, void*, int);
-using Resolve = void(__fastcall*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
 std::atomic_bool g_installed{false};
 hooking::detour::Handle g_hideHandle{};
 /** The handle-table storage slot the tables-load decodes; zero while unresolved. */
 std::atomic<std::uintptr_t> g_tablesSlot{0};
-/** The probe detour on the path-A resolve helper. */
-std::atomic_bool g_resolveInstalled{false};
-hooking::detour::Handle g_resolveHandle{};
-/** Distinct (link0, link1) pairs the probe reported, so each pair logs once per session. */
-std::array<std::atomic<std::uint64_t>, 32> g_probePairs{};
-
-/**
- * Logs one path-A resolve call the first time its link pair is seen. The two links come from
- * the resolved object's +0x58 and +0x1c fields, the only player links the parent-chain rules
- * never saw; a match with the player handle proves the cloth hangs off one of them.
- * @param link0 The low word of the first register, [object + 0x58].
- * @param link1 The third register, [object + 0x1c].
- */
-void report_probe(std::uint32_t link0, std::uint32_t link1) noexcept {
-    const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
-    const std::uint64_t entry = (static_cast<std::uint64_t>(link0) << 32) | link1;
-    for (std::atomic<std::uint64_t>& slot : g_probePairs) {
-        std::uint64_t expected = 0;
-        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
-            const bool link0Match = link0 == player || (link0 & kSlotMask) == (player & kSlotMask);
-            const bool link1Match = link1 == player || (link1 & kSlotMask) == (player & kSlotMask);
-            if (link0Match || link1Match) {
-                std::array<char, 128> line{};
-                const int written =
-                    std::snprintf(line.data(),
-                                  line.size(),
-                                  "ev=photo stage=probe link0=0x%08X link1=0x%08X "
-                                  "player=0x%08X match0=%d match1=%d",
-                                  static_cast<unsigned>(link0),
-                                  static_cast<unsigned>(link1),
-                                  static_cast<unsigned>(player),
-                                  link0Match ? 1 : 0,
-                                  link1Match ? 1 : 0);
-                if (written > 0) {
-                    core::log::write(core::log::Channel::client,
-                                     core::log::Level::warn,
-                                     {line.data(), static_cast<std::size_t>(written)});
-                }
-            }
-            return;
-        }
-        if (expected == entry) {
-            return;
-        }
-    }
-}
-
-/**
- * Observes one resolve-helper call. Only the path-A call site in the entity dispatcher is
- * reported; the same helper also serves the skinned caller, whose draws are already handled.
- */
-void __fastcall resolve_body(std::uintptr_t rcx,
-                             std::uintptr_t rdx,
-                             std::uintptr_t r8,
-                             std::uintptr_t r9) noexcept {
-    if (hide_player_active()) {
-        const std::uintptr_t imageBase =
-            reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-        const std::uintptr_t caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-        if (imageBase != 0 && caller - imageBase == kPathACallSiteOffset) {
-            report_probe(static_cast<std::uint32_t>(rcx), static_cast<std::uint32_t>(r8));
-        }
-    }
-    const Resolve original = reinterpret_cast<Resolve>(g_resolveHandle.original);
-    if (original != nullptr) {
-        original(rcx, rdx, r8, r9);
-    }
-}
 
 /** What a draw owner matched, in increasing distance from the player. */
 enum class Match : std::uint32_t {
@@ -362,6 +284,17 @@ char __fastcall hide_body(std::uintptr_t draw,
     if (hide_player_active() && draw != 0) {
         std::uint32_t owner = kInvalidHandle;
         if (read(draw + kDrawOwnerOffset, owner) && match_for(draw, owner) != Match::none) {
+            // Collect the model handle for the read-only part-table probe before skipping.
+            std::uint32_t model = 0;
+            if (read(draw + sizeof(std::uint64_t), model) && model != 0) {
+                for (std::atomic<std::uint32_t>& slot : g_playerModels) {
+                    std::uint32_t expected = 0;
+                    if (slot.compare_exchange_strong(expected, model, std::memory_order_relaxed)
+                        || expected == model) {
+                        break;
+                    }
+                }
+            }
             return 0;
         }
     }
@@ -396,6 +329,170 @@ std::uint32_t datum_parent(std::uint32_t handle) noexcept {
     return parent_of(handle, base, stride);
 }
 
+/** Logs one line of 16 hex words. */
+void log_words(const char* stage, const std::uint32_t* words) noexcept {
+    std::array<char, 256> line{};
+    std::size_t used = 0;
+    used += static_cast<std::size_t>(
+        std::snprintf(line.data(), line.size(), "ev=photo stage=%s", stage));
+    for (std::size_t i = 0; i < 16 && used + 10 < line.size(); ++i) {
+        used += static_cast<std::size_t>(std::snprintf(
+            line.data() + used, line.size() - used, " %08X", static_cast<unsigned>(words[i])));
+    }
+    core::log::write(
+        core::log::Channel::client, core::log::Level::warn, {line.data(), used});
+}
+
+/** Read-only probe: resolves each collected player model and logs its record layout. */
+void probe_player_models() noexcept {
+    if (!hide_player_active()) {
+        return;
+    }
+    // Only the camera thread runs this, so plain static state is safe.
+    static std::array<std::uint32_t, 16> reported{};
+    static std::size_t reportedCount = 0;
+    const content::handles::Source source{
+        g_tablesSlot.load(std::memory_order_relaxed), nullptr, &memory::copy_current_process};
+    for (std::atomic<std::uint32_t>& slot : g_playerModels) {
+        const std::uint32_t modelHandle = slot.load(std::memory_order_relaxed);
+        if (modelHandle == 0 || modelHandle == kInvalidHandle) {
+            continue;
+        }
+        bool known = false;
+        for (std::size_t i = 0; i < reportedCount; ++i) {
+            known = known || reported[i] == modelHandle;
+        }
+        if (known) {
+            continue;
+        }
+        if (reportedCount < reported.size()) {
+            reported[reportedCount++] = modelHandle;
+        }
+        std::uintptr_t model = 0;
+        if (!content::handles::resolve(source, modelHandle, model) || model == 0) {
+            std::array<char, 96> line{};
+            const int written =
+                std::snprintf(line.data(),
+                              line.size(),
+                              "ev=photo stage=probe_model model=0x%08X result=resolve_fail",
+                              static_cast<unsigned>(modelHandle));
+            if (written > 0) {
+                core::log::write(core::log::Channel::client,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+            }
+            continue;
+        }
+        std::array<char, 128> head{};
+        const int headWritten =
+            std::snprintf(head.data(),
+                          head.size(),
+                          "ev=photo stage=probe_model model=0x%08X addr=0x%p",
+                          static_cast<unsigned>(modelHandle),
+                          reinterpret_cast<void*>(model));
+        if (headWritten > 0) {
+            core::log::write(core::log::Channel::client,
+                             core::log::Level::warn,
+                             {head.data(), static_cast<std::size_t>(headWritten)});
+        }
+        // The first 64 bytes of the runtime record, as two word lines.
+        std::array<std::uint32_t, 32> words{};
+        if (read(model, words)) {
+            log_words("probe_words0", words.data());
+            log_words("probe_words1", words.data() + 16);
+        }
+        // Part-table candidates: rows of 0x20 whose fields match the authored part row layout
+        // (material @0, variant @4, topology @6, first @8, count @0xC, logical @0x14,
+        // flags @0x18, dye @0x1A, lod @0x1B).
+        struct Candidate {
+            std::uint32_t offset{};
+            std::uint32_t score{};
+        };
+        std::array<Candidate, 3> best{};
+        for (std::uint32_t offset = 0; offset < 0x200; offset += 4) {
+            std::uint32_t score = 0;
+            bool plausible = true;
+            for (std::uint32_t row = 0; row < 4 && plausible; ++row) {
+                const std::uintptr_t p = model + offset + row * 0x20;
+                std::uint32_t material = 0, first = 0, count = 0;
+                std::int16_t variant = -1, logical = -1;
+                std::uint16_t flags = 0;
+                std::uint8_t lod = 0;
+                plausible = read(p, material) && read(p + 4, variant) && read(p + 8, first)
+                             && read(p + 0xC, count) && read(p + 0x14, logical)
+                             && read(p + 0x18, flags) && read(p + 0x1B, lod);
+                if (!plausible) {
+                    break;
+                }
+                if (variant >= -1 && variant < 64) {
+                    score += 1;
+                }
+                if (first <= 0x1000000) {
+                    score += 1;
+                }
+                if (count > 0 && count <= 0x400000) {
+                    score += 1;
+                }
+                if (logical >= 0 && logical < 512) {
+                    score += 2;
+                }
+                if ((flags & ~0x3FFU) == 0) {
+                    score += 2;
+                }
+                if (lod < 8) {
+                    score += 2;
+                }
+            }
+            if (!plausible) {
+                continue;
+            }
+            for (Candidate& candidate : best) {
+                if (score > candidate.score) {
+                    candidate = {offset, score};
+                    break;
+                }
+            }
+        }
+        for (const Candidate& candidate : best) {
+            if (candidate.score == 0) {
+                continue;
+            }
+            const std::uintptr_t p = model + candidate.offset;
+            std::uint32_t material = 0, first = 0, count = 0;
+            std::int16_t variant = -1, logical = -1;
+            std::uint16_t flags = 0;
+            std::uint8_t lod = 0;
+            (void)read(p, material);
+            (void)read(p + 4, variant);
+            (void)read(p + 8, first);
+            (void)read(p + 0xC, count);
+            (void)read(p + 0x14, logical);
+            (void)read(p + 0x18, flags);
+            (void)read(p + 0x1B, lod);
+            std::array<char, 200> line{};
+            const int written =
+                std::snprintf(line.data(),
+                              line.size(),
+                              "ev=photo stage=probe_parts +0x%X score=%u "
+                              "mat=0x%08X var=%d first=%u count=%u logical=%d flags=0x%X lod=%u",
+                              candidate.offset,
+                              static_cast<unsigned>(candidate.score),
+                              static_cast<unsigned>(material),
+                              static_cast<int>(variant),
+                              static_cast<unsigned>(first),
+                              static_cast<unsigned>(count),
+                              static_cast<int>(logical),
+                              static_cast<unsigned>(flags),
+                              static_cast<unsigned>(lod));
+            if (written > 0) {
+                core::log::write(core::log::Channel::client,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+            }
+        }
+    }
+}
+
 /** Resolves the producer and attaches the hide-player detour. */
 bool install() noexcept {
     if (g_installed.load(std::memory_order_acquire)) {
@@ -423,19 +520,6 @@ bool install() noexcept {
     } else {
         report_install_failure("tables");
     }
-    // The path-A probe detour observes the resolve helper; a miss leaves the hide untouched.
-    std::byte* const resolve = patterns::scan_main_image_unique(kResolve, "photo_probe_resolve");
-    if (resolve != nullptr) {
-        if (hooking::detour::install(
-                hooking::detour::Spec{resolve, reinterpret_cast<void*>(&resolve_body)},
-                g_resolveHandle)) {
-            g_resolveInstalled.store(true, std::memory_order_release);
-        } else {
-            report_install_failure("probe_attach");
-        }
-    } else {
-        report_install_failure("probe_pattern");
-    }
     g_installed.store(true, std::memory_order_release);
     g_hideInstalled.store(true, std::memory_order_release);
     core::log::write(
@@ -446,10 +530,6 @@ bool install() noexcept {
 /** Disarms the skip first, then detaches the producer detour. */
 void uninstall() noexcept {
     g_hideInstalled.store(false, std::memory_order_release);
-    if (g_resolveInstalled.load(std::memory_order_acquire)) {
-        (void)hooking::detour::uninstall(g_resolveHandle);
-        g_resolveInstalled.store(false, std::memory_order_release);
-    }
     if (!g_installed.load(std::memory_order_acquire)) {
         return;
     }

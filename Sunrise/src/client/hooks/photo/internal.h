@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -19,6 +20,8 @@ extern std::atomic_bool g_capturePending;
 /** Object-pool storage-slot addresses, cached while the world-object hooks accept reads. */
 extern std::atomic<std::uintptr_t> g_poolBaseSlot;
 extern std::atomic<std::uintptr_t> g_poolStrideSlot;
+/** Distinct model handles of the player's skinned draws, collected for the read-only probe. */
+extern std::array<std::atomic<std::uint32_t>, 16> g_playerModels;
 
 /**
  * Reads one object's parent handle from the datum pool. The slot addresses must be cached
@@ -27,5 +30,12 @@ extern std::atomic<std::uintptr_t> g_poolStrideSlot;
  * @return The parent handle, or kInvalidHandle when the pool or the object cannot be read.
  */
 [[nodiscard]] std::uint32_t datum_parent(std::uint32_t handle) noexcept;
+
+/**
+ * Read-only probe: resolves every collected player model handle and logs the model record
+ * layout, so the part table that carries the 0x40 hidden-part flag can be located. Logs each
+ * model once. Runs on the camera thread, so its state needs no lock.
+ */
+void probe_player_models() noexcept;
 
 } // namespace sunrise::client::hooks::photo

@@ -408,6 +408,7 @@ void refresh_player_handle() noexcept {
     if (teleport::controlled_handle(handle)) {
         g_playerHandle.store(handle, std::memory_order_release);
         g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
+        probe_player_models();
         return;
     }
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
@@ -441,6 +442,9 @@ void reset() noexcept {
     g_poolStrideSlot.store(0, std::memory_order_relaxed);
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
     g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
+    for (std::atomic<std::uint32_t>& slot : g_playerModels) {
+        slot.store(0, std::memory_order_relaxed);
+    }
 }
 
 } // namespace sunrise::client::hooks::photo
