@@ -57,6 +57,22 @@ using Producer = char(__fastcall*)(std::uintptr_t, void*, std::uintptr_t, void*,
 std::atomic_bool g_installed{false};
 hooking::detour::Handle g_hideHandle{};
 
+/** Diagnostic counters, reset by each report line. */
+std::atomic<std::uint64_t> g_seen{0};
+std::atomic<std::uint64_t> g_hidden{0};
+std::atomic<std::uint64_t> g_lastReport{0};
+/** Distinct owners matched by the parent rule, so the report stays one line per object. */
+std::array<std::atomic<std::uint64_t>, 16> g_parentMatches{};
+/** How often the counter line repeats while the hide is on. */
+constexpr std::uint64_t kReportIntervalMs = 5000;
+
+/** What a draw owner matched, in increasing distance from the player. */
+enum class Match : std::uint32_t {
+    none = 0,
+    player = 1,
+    parent = 2,
+};
+
 /**
  * Reads one scalar from this process under a fault guard.
  * @param address Source address.
@@ -69,21 +85,8 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
         nullptr, address, std::as_writable_bytes(std::span(&output, 1)));
 }
 
-/**
- * Walks one object's parent chain and tests it against the local player.
- * The weapon and the class-item cloth are child objects of the player's entity, so their draws
- * carry a different owner handle than the body's and need the ancestor test.
- * @param owner Draw owner handle to test.
- * @return True when the owner is the player's object or has it as an ancestor.
- */
-[[nodiscard]] bool belongs_to_local_player(std::uint32_t owner) noexcept {
-    if (owns_player_object(owner)) {
-        return true;
-    }
-    const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
-    if (player == kInvalidHandle) {
-        return false;
-    }
+/** @return The object pool base and stride values, or false while they cannot be read. */
+[[nodiscard]] bool pool(std::uintptr_t& base, std::uint32_t& stride) noexcept {
     const std::uintptr_t baseSlot = g_poolBaseSlot.load(std::memory_order_relaxed);
     const std::uintptr_t strideSlot = g_poolStrideSlot.load(std::memory_order_relaxed);
     if (baseSlot == 0 || strideSlot == 0) {
@@ -91,29 +94,107 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
     }
     // The slots hold the game's current pool values; reading them per call keeps a teardown from
     // publishing a stale base through the cached slot addresses.
+    return read(baseSlot, base) && base != 0 && read(strideSlot, stride)
+           && stride >= kDatumLinkBytes;
+}
+
+/** @return The parent handle of one object, or kInvalidHandle when it cannot be read. */
+[[nodiscard]] std::uint32_t parent_of(std::uint32_t handle, std::uintptr_t base,
+                                      std::uint32_t stride) noexcept {
+    const std::uint64_t offset = static_cast<std::uint64_t>(stride) * (handle & kSlotMask);
+    const std::uintptr_t object = base + static_cast<std::uintptr_t>(offset);
+    std::uint32_t self = kInvalidHandle;
+    std::uint32_t parent = kInvalidHandle;
+    if (!read(object + kObjectSelfOffset, self) || self != handle
+        || !read(object + kObjectParentOffset, parent)) {
+        return kInvalidHandle;
+    }
+    return parent;
+}
+
+/**
+ * Tests one draw owner against the local player. The match set is the player object and its
+ * parent: the first-person weapon hangs off the player's chain, while entity-level attachments
+ * like the class-item cloth can hang off the player's parent as a sibling object.
+ * @param owner Draw owner handle to test.
+ * @return What the owner matched, or Match::none.
+ */
+[[nodiscard]] Match match_kind(std::uint32_t owner) noexcept {
+    if (owns_player_object(owner)) {
+        return Match::player;
+    }
+    const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
+    if (player == kInvalidHandle) {
+        return Match::none;
+    }
+    const std::uint32_t playerParent = g_playerParent.load(std::memory_order_relaxed);
     std::uintptr_t base = 0;
     std::uint32_t stride = 0;
-    if (!read(baseSlot, base) || base == 0 || !read(strideSlot, stride)
-        || stride < kDatumLinkBytes) {
-        return false;
+    if (!pool(base, stride)) {
+        return Match::none;
     }
     std::uint32_t cursor = owner;
     for (std::size_t depth = 0; depth < kMaximumAncestors; ++depth) {
-        const std::uint64_t offset =
-            static_cast<std::uint64_t>(stride) * (cursor & kSlotMask);
-        const std::uintptr_t object = base + static_cast<std::uintptr_t>(offset);
-        std::uint32_t self = kInvalidHandle;
-        std::uint32_t parent = kInvalidHandle;
-        if (!read(object + kObjectSelfOffset, self) || self != cursor
-            || !read(object + kObjectParentOffset, parent) || parent == kInvalidHandle) {
-            return false;
+        const std::uint32_t parent = parent_of(cursor, base, stride);
+        if (parent == kInvalidHandle) {
+            return Match::none;
         }
         if (parent == player) {
-            return true;
+            return Match::player;
+        }
+        if (parent == playerParent) {
+            return Match::parent;
         }
         cursor = parent;
     }
-    return false;
+    return Match::none;
+}
+
+/** Logs the owner once, the first time the parent rule hides it. */
+void report_parent_match(std::uint32_t owner) noexcept {
+    const std::uint64_t entry =
+        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(Match::parent);
+    for (std::atomic<std::uint64_t>& slot : g_parentMatches) {
+        std::uint64_t expected = 0;
+        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
+            std::array<char, 96> line{};
+            const int written = std::snprintf(
+                line.data(), line.size(), "ev=photo stage=hide_parent owner=0x%08X",
+                static_cast<unsigned>(owner));
+            if (written > 0) {
+                core::log::write(core::log::Channel::client,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+            }
+            return;
+        }
+        if (expected == entry) {
+            return;
+        }
+    }
+}
+
+/** Emits one counter line every few seconds, so a skipped draw set is visible in the log. */
+void report_counters() noexcept {
+    const std::uint64_t now = GetTickCount64();
+    std::uint64_t last = g_lastReport.load(std::memory_order_relaxed);
+    if (now - last < kReportIntervalMs
+        || !g_lastReport.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        return;
+    }
+    const std::uint64_t seen = g_seen.exchange(0, std::memory_order_relaxed);
+    const std::uint64_t hidden = g_hidden.exchange(0, std::memory_order_relaxed);
+    std::array<char, 128> line{};
+    const int written = std::snprintf(line.data(),
+                                      line.size(),
+                                      "ev=photo stage=hide seen=%llu hidden=%llu",
+                                      static_cast<unsigned long long>(seen),
+                                      static_cast<unsigned long long>(hidden));
+    if (written > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {line.data(), static_cast<std::size_t>(written)});
+    }
 }
 
 /**
@@ -128,9 +209,18 @@ char __fastcall hide_body(std::uintptr_t draw,
                           int pass) noexcept {
     if (hide_player_active() && draw != 0) {
         std::uint32_t owner = kInvalidHandle;
-        if (read(draw + kDrawOwnerOffset, owner) && belongs_to_local_player(owner)) {
-            // Zero tells the caller nothing was produced, which drops the draw from the frame.
-            return 0;
+        if (read(draw + kDrawOwnerOffset, owner)) {
+            g_seen.fetch_add(1, std::memory_order_relaxed);
+            const Match kind = match_kind(owner);
+            if (kind != Match::none) {
+                g_hidden.fetch_add(1, std::memory_order_relaxed);
+                if (kind == Match::parent) {
+                    report_parent_match(owner);
+                }
+                // Zero tells the caller nothing was produced, which drops the draw from the frame.
+                return 0;
+            }
+            report_counters();
         }
     }
     const Producer original = reinterpret_cast<Producer>(g_hideHandle.original);
@@ -150,6 +240,19 @@ void report_install_failure(const char* reason) noexcept {
 }
 
 } // namespace
+
+/** Reads one object's parent handle from the datum pool. */
+std::uint32_t datum_parent(std::uint32_t handle) noexcept {
+    if (handle == kInvalidHandle) {
+        return kInvalidHandle;
+    }
+    std::uintptr_t base = 0;
+    std::uint32_t stride = 0;
+    if (!pool(base, stride)) {
+        return kInvalidHandle;
+    }
+    return parent_of(handle, base, stride);
+}
 
 /** Resolves the producer and attaches the hide-player detour. */
 bool install() noexcept {
