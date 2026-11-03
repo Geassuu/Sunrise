@@ -97,17 +97,6 @@ hooking::detour::Handle g_hideHandle{};
 /** The handle-table storage slot the tables-load decodes; zero while unresolved. */
 std::atomic<std::uintptr_t> g_tablesSlot{0};
 
-/** Diagnostic counters, reset by each report line. */
-std::atomic<std::uint64_t> g_seen{0};
-std::atomic<std::uint64_t> g_hidden{0};
-std::atomic<std::uint64_t> g_lastReport{0};
-/** Distinct owners matched by a hide rule, one line per rule. */
-std::array<std::atomic<std::uint64_t>, 16> g_parentMatches{};
-/** Distinct owners no rule hides, so the missing links reach the log once each. */
-std::array<std::atomic<std::uint64_t>, 48> g_skips{};
-/** How often the counter line repeats while the hide is on. */
-constexpr std::uint64_t kReportIntervalMs = 5000;
-
 /** What a draw owner matched, in increasing distance from the player. */
 enum class Match : std::uint32_t {
     none = 0,
@@ -276,98 +265,10 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
     return Match::none;
 }
 
-/** Logs one owner the first time a rule hides it, one line per rule. */
-void report_match(std::uint32_t owner, Match kind) noexcept {
-    const std::uint64_t entry =
-        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(kind);
-    for (std::atomic<std::uint64_t>& slot : g_parentMatches) {
-        std::uint64_t expected = 0;
-        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
-            std::array<char, 96> line{};
-            const int written =
-                std::snprintf(line.data(),
-                              line.size(),
-                              "ev=photo stage=hide_match owner=0x%08X kind=%u",
-                              static_cast<unsigned>(owner),
-                              static_cast<unsigned>(kind));
-            if (written > 0) {
-                core::log::write(core::log::Channel::client,
-                                 core::log::Level::warn,
-                                 {line.data(), static_cast<std::size_t>(written)});
-            }
-            return;
-        }
-        if (expected == entry) {
-            return;
-        }
-    }
-}
-
-/** Logs one draw that no rule hides, once per owner, with the links that rule needs next. */
-void report_skip(std::uintptr_t draw, std::uint32_t owner) noexcept {
-    const std::uint64_t entry =
-        (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(Match::none);
-    for (std::atomic<std::uint64_t>& slot : g_skips) {
-        std::uint64_t expected = 0;
-        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
-            std::uintptr_t base = 0;
-            std::uint32_t stride = 0;
-            const std::uint32_t parent =
-                pool(base, stride) ? parent_of(owner, base, stride) : kInvalidHandle;
-            std::uint32_t component = kInvalidHandle;
-            const std::uint32_t ownerOf =
-                read(draw, component) ? component_owner(component) : kInvalidHandle;
-            std::uint32_t model = 0;
-            (void)read(draw + sizeof(std::uint64_t), model);
-            std::array<char, 160> line{};
-            const int written =
-                std::snprintf(line.data(),
-                              line.size(),
-                              "ev=photo stage=hide_skip owner=0x%08X parent=0x%08X "
-                              "comp_owner=0x%08X model=0x%08X",
-                              static_cast<unsigned>(owner),
-                              static_cast<unsigned>(parent),
-                              static_cast<unsigned>(ownerOf),
-                              static_cast<unsigned>(model));
-            if (written > 0) {
-                core::log::write(core::log::Channel::client,
-                                 core::log::Level::warn,
-                                 {line.data(), static_cast<std::size_t>(written)});
-            }
-            return;
-        }
-        if (expected == entry) {
-            return;
-        }
-    }
-}
-
-/** Emits one counter line every few seconds, so a skipped draw set is visible in the log. */
-void report_counters() noexcept {
-    const std::uint64_t now = GetTickCount64();
-    std::uint64_t last = g_lastReport.load(std::memory_order_relaxed);
-    if (now - last < kReportIntervalMs
-        || !g_lastReport.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
-        return;
-    }
-    const std::uint64_t seen = g_seen.exchange(0, std::memory_order_relaxed);
-    const std::uint64_t hidden = g_hidden.exchange(0, std::memory_order_relaxed);
-    std::array<char, 128> line{};
-    const int written = std::snprintf(line.data(),
-                                      line.size(),
-                                      "ev=photo stage=hide seen=%llu hidden=%llu",
-                                      static_cast<unsigned long long>(seen),
-                                      static_cast<unsigned long long>(hidden));
-    if (written > 0) {
-        core::log::write(core::log::Channel::client,
-                         core::log::Level::warn,
-                         {line.data(), static_cast<std::size_t>(written)});
-    }
-}
-
 /**
  * One skinned draw, called by the game while the render frame is built.
- * A hidden player draw never reaches the original producer.
+ * A hidden player draw never reaches the original producer: with its palettes never produced,
+ * the player's meshes collapse and drop out of sight, which is what hides them.
  */
 char __fastcall hide_body(std::uintptr_t draw,
                           void* flags,
@@ -377,17 +278,8 @@ char __fastcall hide_body(std::uintptr_t draw,
                           int pass) noexcept {
     if (hide_player_active() && draw != 0) {
         std::uint32_t owner = kInvalidHandle;
-        if (read(draw + kDrawOwnerOffset, owner)) {
-            g_seen.fetch_add(1, std::memory_order_relaxed);
-            const Match kind = match_for(draw, owner);
-            if (kind != Match::none) {
-                g_hidden.fetch_add(1, std::memory_order_relaxed);
-                report_match(owner, kind);
-                // Zero tells the caller nothing was produced, which drops the draw from the frame.
-                return 0;
-            }
-            report_skip(draw, owner);
-            report_counters();
+        if (read(draw + kDrawOwnerOffset, owner) && match_for(draw, owner) != Match::none) {
+            return 0;
         }
     }
     const Producer original = reinterpret_cast<Producer>(g_hideHandle.original);

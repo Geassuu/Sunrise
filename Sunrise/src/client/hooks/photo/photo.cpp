@@ -406,24 +406,8 @@ void refresh_player_handle() noexcept {
     }
     std::uint32_t handle = kInvalidHandle;
     if (teleport::controlled_handle(handle)) {
-        const std::uint32_t parent = datum_parent(handle);
-        g_playerParent.store(parent, std::memory_order_relaxed);
-        // The handle changes on a respawn or character switch; one line per change keeps the
-        // hide-player chain visible in the log without a per-frame flood.
-        if (g_playerHandle.exchange(handle, std::memory_order_release) != handle) {
-            std::array<char, 96> line{};
-            const int written =
-                std::snprintf(line.data(),
-                              line.size(),
-                              "ev=photo stage=hide_player player=0x%08X parent=0x%08X",
-                              static_cast<unsigned>(handle),
-                              static_cast<unsigned>(parent));
-            if (written > 0) {
-                core::log::write(core::log::Channel::client,
-                                 core::log::Level::warn,
-                                 {line.data(), static_cast<std::size_t>(written)});
-            }
-        }
+        g_playerHandle.store(handle, std::memory_order_release);
+        g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
         return;
     }
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
