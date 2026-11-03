@@ -29,6 +29,7 @@
 #include "../../photo/photo_settings_store.h"
 #include "../noclip/runtime.h"
 #include "../teleport/runtime.h"
+#include "../world_objects/internal.h"
 #include "internal.h"
 
 namespace sunrise::client::hooks::photo {
@@ -37,6 +38,8 @@ namespace sunrise::client::hooks::photo {
 std::atomic<std::uint32_t> g_playerHandle{kInvalidHandle};
 std::atomic_bool g_hideInstalled{false};
 std::atomic_bool g_capturePending{false};
+std::atomic<std::uintptr_t> g_poolBaseSlot{0};
+std::atomic<std::uintptr_t> g_poolStrideSlot{0};
 
 namespace {
 
@@ -385,6 +388,21 @@ void before_step(void* body) noexcept {
 void refresh_player_handle() noexcept {
     const client::photo::Settings settings = client::photo::get();
     g_hideActive.store(settings.enabled && settings.hidePlayer, std::memory_order_relaxed);
+    // The object pool carries the parent links the hide-player detour walks. The slots are
+    // published by the world-object hooks, so they are cached only while those hooks accept.
+    namespace objects = hooks::world_objects;
+    if (TryAcquireSRWLockShared(&objects::g_lock)) {
+        if (objects::g_accepting.load(std::memory_order_acquire)) {
+            g_poolBaseSlot.store(reinterpret_cast<std::uintptr_t>(objects::g_datumBaseStorage),
+                                 std::memory_order_relaxed);
+            g_poolStrideSlot.store(reinterpret_cast<std::uintptr_t>(objects::g_datumStrideStorage),
+                                   std::memory_order_relaxed);
+        } else {
+            g_poolBaseSlot.store(0, std::memory_order_relaxed);
+            g_poolStrideSlot.store(0, std::memory_order_relaxed);
+        }
+        ReleaseSRWLockShared(&objects::g_lock);
+    }
     std::uint32_t handle = kInvalidHandle;
     if (teleport::controlled_handle(handle)) {
         g_playerHandle.store(handle, std::memory_order_release);
@@ -416,6 +434,8 @@ void reset() noexcept {
     g_capturePending.store(false, std::memory_order_release);
     g_openPending.store(false, std::memory_order_release);
     g_hideActive.store(false, std::memory_order_relaxed);
+    g_poolBaseSlot.store(0, std::memory_order_relaxed);
+    g_poolStrideSlot.store(0, std::memory_order_relaxed);
     g_playerHandle.store(kInvalidHandle, std::memory_order_release);
 }
 

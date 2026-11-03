@@ -14,5 +14,8 @@ extern std::atomic<std::uint32_t> g_playerHandle;
 extern std::atomic_bool g_hideInstalled;
 /** One capture request latched by the shutter or the menu, waiting for the presentation thread. */
 extern std::atomic_bool g_capturePending;
+/** Object-pool storage-slot addresses, cached while the world-object hooks accept reads. */
+extern std::atomic<std::uintptr_t> g_poolBaseSlot;
+extern std::atomic<std::uintptr_t> g_poolStrideSlot;
 
 } // namespace sunrise::client::hooks::photo
