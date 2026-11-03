@@ -24,6 +24,7 @@
 #include "../../patterns/image_scan.h"
 #include "../../player/player_position.h"
 #include "../fly/fly.h"
+#include "../photo/photo.h"
 #include "../teleport/runtime.h"
 #include "runtime.h"
 
@@ -307,10 +308,16 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
     std::array<float, kVectorLanes> nativePosition{};
     const bool enabledBeforeStep = poll_toggle();
     const bool flying = fly::enabled();
-    std::byte* const before = (enabledBeforeStep || flying) ? player_body(simulation) : nullptr;
+    const bool photoing = photo::enabled();
+    std::byte* const before =
+        (enabledBeforeStep || flying || photoing) ? player_body(simulation) : nullptr;
     // Fly writes first, so the velocity read below is the one it asked for.
     if (flying) {
         fly::before_step(before);
+    }
+    // The free camera writes last and owns the same lanes, so it wins when both are on.
+    if (photoing) {
+        photo::before_step(before);
     }
     const bool hasBody = before != nullptr;
     if (hasBody) {
@@ -318,8 +325,9 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
         nativePosition = field<std::array<float, kVectorLanes>>(before, kBodyPosition);
     }
     // Rest the body through the step: this hook writes the position, and contact damage scales
-    // with speed. The held velocity goes back after the step.
-    const bool rested = enabledBeforeStep && flying && hasBody;
+    // with speed. The held velocity goes back after the step. The free camera also carries its
+    // own position, so it rests the same way.
+    const bool rested = ((enabledBeforeStep && flying) || photoing) && hasBody;
     if (rested) {
         field<std::array<float, kVectorLanes>>(before, kBodyVelocity) = {};
     }
@@ -328,11 +336,14 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
     const std::int32_t result = next != nullptr ? next(simulation, deltaTime) : 0;
 
     // The body is resolved once here for both features.
-    std::byte* const body = (enabledBeforeStep || flying) ? player_body(simulation) : nullptr;
+    std::byte* const body =
+        (enabledBeforeStep || flying || photoing) ? player_body(simulation) : nullptr;
     // A character created or replaced during this step has no matching before-state.
     const bool sameBody = hasBody && body == before;
     // Re-read after the step, so a toggle from the interface thread lands before a position write.
-    const bool noclipping = enabledBeforeStep && enabled();
+    // The free camera carries its position through the same branch as noclip, without needing the
+    // noclip switch on.
+    const bool noclipping = (enabledBeforeStep && enabled()) || photoing;
     if (flying) {
         // Taken before any write below, so it shows what the step alone did to the body.
         std::array<float, kVectorLanes> moved{};
@@ -352,15 +363,16 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
                     length_of(leftOver));
     }
     // With both on this hook drives all three lanes. Fly holds the height, so carrying the
-    // vertical one is safe.
-    const bool verticalToo = noclipping && flying;
+    // vertical one is safe. The free camera always carries its vertical lane.
+    const bool verticalToo = (noclipping && flying) || photoing;
     if (flying) {
         fly::after_step(body, verticalToo);
     }
     // The game reads this field after the step and damages the player for carrying speed into
     // geometry. It is shown a capped speed instead. Nothing is lost: the step it belonged to has
-    // already run, and fly writes the real speed again before the next one.
-    if (flying && sameBody) {
+    // already run, and fly writes the real speed again before the next one. The free camera
+    // gets the same treatment.
+    if ((flying || photoing) && sameBody) {
         const std::array<float, kVectorLanes> moved =
             rested ? nativeVelocity : field<std::array<float, kVectorLanes>>(body, kBodyVelocity);
         field<std::array<float, kVectorLanes>>(body, kBodyVelocity) =

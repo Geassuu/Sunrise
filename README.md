@@ -24,6 +24,7 @@ See the [FAQ](https://projectsunrise.dev/faq/) for more information
 - Load into any Destination (matchmade activities are currently broken)
 - Script Missions
 - Exploration Features (Fly, Noclip, Activity Override, ...)
+- Photo Mode (free camera, hide player, JPEG captures into a configurable folder)
 - Persistent Save
 
 ## WIP

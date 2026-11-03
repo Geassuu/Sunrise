@@ -32,6 +32,7 @@
 #include "../hooks/package_path/package_path_redirect.h"
 #include "../hooks/package_trust/package_trust_bypass.h"
 #include "../hooks/polled_input/runtime.h"
+#include "../hooks/photo/photo.h"
 #include "../hooks/retail_log/retail_log_lifecycle.h"
 #include "../hooks/stall_probe/stall_probe.h"
 #include "../hooks/teleport/runtime.h"
@@ -197,6 +198,8 @@ void clear_game_targets() noexcept {
         // Noclip owns its Havok-step target, so a patch-specific miss cannot disable teleport.
         (void)hooks::noclip::install();
         (void)hooks::infinite_ammo::install();
+        // The free camera rides the teleport and Havok hooks; only the hide-player detour is new.
+        (void)hooks::photo::install();
     }
     // Resolves the activity config getter here; the hold itself runs on the frame tick.
     (void)hooks::inactivity::install();

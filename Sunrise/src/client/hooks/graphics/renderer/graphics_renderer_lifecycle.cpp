@@ -9,6 +9,7 @@
 #include "../../../ui/mission_launch/mission_launch_art.h"
 #include "../../cursor/runtime.h"
 #include "../../inactivity/inactivity_override.h"
+#include "../../photo/photo.h"
 #include "../../polled_input/runtime.h"
 #include "../input/input.h"
 #include "graphics_renderer_report.h"
@@ -314,6 +315,8 @@ void present(IDXGISwapChain* swapChain) noexcept {
     }
     bool framed = false;
     if (g_resources.swapChain == swapChain && fully_active_locked()) {
+        // The capture runs before the overlay draws, so the photo holds only the game frame.
+        photo::try_capture(swapChain, g_resources.device, g_resources.context);
         render_frame_locked();
         framed = true;
     }

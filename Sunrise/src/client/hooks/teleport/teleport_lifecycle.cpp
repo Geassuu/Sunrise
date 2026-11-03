@@ -17,6 +17,7 @@
 #include "../../player/player_position.h"
 #include "../bootflow/bootflow_hook_lifecycle.h"
 #include "../fly/fly.h"
+#include "../photo/photo.h"
 #include "../polled_input/runtime.h"
 #include "../sword_skate/sword_skate.h"
 #include "internal.h"
@@ -89,6 +90,10 @@ std::int64_t __fastcall camera_transform(std::uint32_t playerIndex) noexcept {
     force_pending();
     // Read here, not on the physics tick: that tick stops for a player who is standing still.
     hooks::fly::poll_toggle();
+    hooks::photo::poll_toggle();
+    hooks::photo::poll_shutter();
+    hooks::photo::refresh_player_handle();
+    hooks::photo::dispatch_open_folder();
     client::player::position::poll();
     hooks::bootflow::poll_world_step();
     hooks::bootflow::poll_current_slice_set();
@@ -109,6 +114,7 @@ std::int64_t __fastcall physics_sync(std::byte* component, std::byte* outFlags) 
     // is written and read inside this tick, so it has to run here and not on a frame poll.
     hooks::sword_skate::apply(component);
     hooks::fly::apply(component);
+    hooks::photo::apply(component);
     // This tick is the only one that sees every component, so it is where the player's is found.
     client::player::position::observe(component);
     const PhysicsSync next = original<PhysicsSync>(kPhysicsSlot);
@@ -208,6 +214,7 @@ bool uninstall() noexcept {
     clear_targets();
     clear_action_keys();
     hooks::fly::reset();
+    hooks::photo::reset();
     client::player::position::reset();
     polled_input::release_key();
     // A thread still inside a replacement keeps the detours; the cleared targets make them inert.
