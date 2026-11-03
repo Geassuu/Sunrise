@@ -362,10 +362,11 @@ std::size_t g_patchedModelCount{};
 
 /** @param row Read part row. @return True when its fields fit the authored layout. */
 [[nodiscard]] bool plausible_part_row(const PartRow& row) noexcept {
-    return row.material != 0 && row.material != 0xFFFFFFFFU
-           && (row.material & 0x80000000U) != 0 && row.logical >= 0 && row.logical < 64
-           && (row.flags & ~0xFFU) == 0 && row.lod <= 7 && row.first <= 0x1000000
-           && row.count > 0 && row.count <= 0x400000;
+    // The material may be 0 or 0xFFFFFFFF: parts with no direct material draw from their
+    // external group, and a selected material of -1 is itself a draw stop. The index and flag
+    // fields carry the signal instead.
+    return row.logical >= 0 && row.logical < 64 && (row.flags & ~0xFFU) == 0 && row.lod <= 7
+           && row.first <= 0x1000000 && row.count > 0 && row.count <= 0x400000;
 }
 
 /**
@@ -395,7 +396,7 @@ std::size_t g_patchedModelCount{};
             continue;
         }
         std::size_t rows = 2;
-        for (std::size_t extra = 2; extra < 64; ++extra) {
+        for (std::size_t extra = 2; extra < 128; ++extra) {
             PartRow next{};
             if (!read_part_row(first + extra * 0x20, next) || !plausible_part_row(next)) {
                 break;
