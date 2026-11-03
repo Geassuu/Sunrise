@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <intrin.h>
 #include <limits>
 #include <span>
 #include <string_view>
@@ -48,6 +49,19 @@ constexpr auto kTablesLoad =
     patterns::signature<patterns::signature_length(kTablesLoadText)>(kTablesLoadText);
 /** The tables load's operand occupies bytes 53..56. */
 constexpr std::size_t kTablesOperand = 53, kTablesNext = 57;
+
+/**
+ * The record-resolve helper the no-pose-production path calls. The probe detour observes its
+ * two link fields, rcx's low word ([object + 0x58]) and r8 ([object + 0x1c]), and reports the
+ * ones whose call site is the path-A resolve inside the entity dispatcher.
+ */
+constexpr std::string_view kResolveText =
+    "4C 8B 54 24 28 4C 8B DA 0F 28 05 ? ? ? ? 41 0F 11 02 4D 85 C9 0F 84 93 01 00 00";
+/** Compiled pattern bytes of the resolve-helper signature. */
+constexpr auto kResolve =
+    patterns::signature<patterns::signature_length(kResolveText)>(kResolveText);
+/** Image offset of the path-A call site inside the entity dispatcher. */
+constexpr std::uintptr_t kPathACallSiteOffset = 0x11ADE68;
 
 /** The draw record's owner handle sits four bytes in, the same read the Studio observer makes. */
 constexpr std::size_t kDrawOwnerOffset = sizeof(std::uint32_t);
@@ -91,11 +105,80 @@ constexpr std::uint32_t kHandleSignBit = 0x80000000U, kRuntimeTableMask = 0x3FFU
 constexpr std::uint32_t kHandleIndexShift = 13;
 
 using Producer = char(__fastcall*)(std::uintptr_t, void*, std::uintptr_t, void*, void*, int);
+using Resolve = void(__fastcall*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
 
 std::atomic_bool g_installed{false};
 hooking::detour::Handle g_hideHandle{};
 /** The handle-table storage slot the tables-load decodes; zero while unresolved. */
 std::atomic<std::uintptr_t> g_tablesSlot{0};
+/** The probe detour on the path-A resolve helper. */
+std::atomic_bool g_resolveInstalled{false};
+hooking::detour::Handle g_resolveHandle{};
+/** Distinct (link0, link1) pairs the probe reported, so each pair logs once per session. */
+std::array<std::atomic<std::uint64_t>, 32> g_probePairs{};
+
+/**
+ * Logs one path-A resolve call the first time its link pair is seen. The two links come from
+ * the resolved object's +0x58 and +0x1c fields, the only player links the parent-chain rules
+ * never saw; a match with the player handle proves the cloth hangs off one of them.
+ * @param link0 The low word of the first register, [object + 0x58].
+ * @param link1 The third register, [object + 0x1c].
+ */
+void report_probe(std::uint32_t link0, std::uint32_t link1) noexcept {
+    const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
+    const std::uint64_t entry = (static_cast<std::uint64_t>(link0) << 32) | link1;
+    for (std::atomic<std::uint64_t>& slot : g_probePairs) {
+        std::uint64_t expected = 0;
+        if (slot.compare_exchange_strong(expected, entry, std::memory_order_relaxed)) {
+            const bool link0Match = link0 == player || (link0 & kSlotMask) == (player & kSlotMask);
+            const bool link1Match = link1 == player || (link1 & kSlotMask) == (player & kSlotMask);
+            if (link0Match || link1Match) {
+                std::array<char, 128> line{};
+                const int written =
+                    std::snprintf(line.data(),
+                                  line.size(),
+                                  "ev=photo stage=probe link0=0x%08X link1=0x%08X "
+                                  "player=0x%08X match0=%d match1=%d",
+                                  static_cast<unsigned>(link0),
+                                  static_cast<unsigned>(link1),
+                                  static_cast<unsigned>(player),
+                                  link0Match ? 1 : 0,
+                                  link1Match ? 1 : 0);
+                if (written > 0) {
+                    core::log::write(core::log::Channel::client,
+                                     core::log::Level::warn,
+                                     {line.data(), static_cast<std::size_t>(written)});
+                }
+            }
+            return;
+        }
+        if (expected == entry) {
+            return;
+        }
+    }
+}
+
+/**
+ * Observes one resolve-helper call. Only the path-A call site in the entity dispatcher is
+ * reported; the same helper also serves the skinned caller, whose draws are already handled.
+ */
+void __fastcall resolve_body(std::uintptr_t rcx,
+                             std::uintptr_t rdx,
+                             std::uintptr_t r8,
+                             std::uintptr_t r9) noexcept {
+    if (hide_player_active()) {
+        const std::uintptr_t imageBase =
+            reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const std::uintptr_t caller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        if (imageBase != 0 && caller - imageBase == kPathACallSiteOffset) {
+            report_probe(static_cast<std::uint32_t>(rcx), static_cast<std::uint32_t>(r8));
+        }
+    }
+    const Resolve original = reinterpret_cast<Resolve>(g_resolveHandle.original);
+    if (original != nullptr) {
+        original(rcx, rdx, r8, r9);
+    }
+}
 
 /** What a draw owner matched, in increasing distance from the player. */
 enum class Match : std::uint32_t {
@@ -340,6 +423,19 @@ bool install() noexcept {
     } else {
         report_install_failure("tables");
     }
+    // The path-A probe detour observes the resolve helper; a miss leaves the hide untouched.
+    std::byte* const resolve = patterns::scan_main_image_unique(kResolve, "photo_probe_resolve");
+    if (resolve != nullptr) {
+        if (hooking::detour::install(
+                hooking::detour::Spec{resolve, reinterpret_cast<void*>(&resolve_body)},
+                g_resolveHandle)) {
+            g_resolveInstalled.store(true, std::memory_order_release);
+        } else {
+            report_install_failure("probe_attach");
+        }
+    } else {
+        report_install_failure("probe_pattern");
+    }
     g_installed.store(true, std::memory_order_release);
     g_hideInstalled.store(true, std::memory_order_release);
     core::log::write(
@@ -350,6 +446,10 @@ bool install() noexcept {
 /** Disarms the skip first, then detaches the producer detour. */
 void uninstall() noexcept {
     g_hideInstalled.store(false, std::memory_order_release);
+    if (g_resolveInstalled.load(std::memory_order_acquire)) {
+        (void)hooking::detour::uninstall(g_resolveHandle);
+        g_resolveInstalled.store(false, std::memory_order_release);
+    }
     if (!g_installed.load(std::memory_order_acquire)) {
         return;
     }
