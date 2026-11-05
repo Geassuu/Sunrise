@@ -614,15 +614,29 @@ void refresh_player_handle() noexcept {
                     if (candidate == 0 || candidate == kInvalidHandle || candidate == player) {
                         continue;
                     }
-                    const std::uint32_t parent = datum_parent(candidate);
-                    if (parent != kInvalidHandle && parent == player) {
+                    // The chain walk, like the hide match: the weapon and the ghost reach the
+                    // player within a few datum parents.
+                    std::uint32_t cursor = candidate;
+                    bool reaches = false;
+                    for (std::size_t depth = 0; depth < 8; ++depth) {
+                        const std::uint32_t parent = datum_parent(cursor);
+                        if (parent == kInvalidHandle) {
+                            break;
+                        }
+                        if (parent == player) {
+                            reaches = true;
+                            break;
+                        }
+                        cursor = parent;
+                    }
+                    if (reaches) {
                         fallback = candidate;
                         fallbackClass = dynamic[i].classTag;
                         break;
                     }
                 }
             }
-            std::array<char, 160> line{};
+            std::array<char, 320> line{};
             int written = 0;
             if (fallback != 0) {
                 g_carrierHandle.store(fallback, std::memory_order_release);
@@ -632,9 +646,24 @@ void refresh_player_handle() noexcept {
                                         static_cast<unsigned>(fallback),
                                         static_cast<unsigned>(fallbackClass));
             } else {
-                written = std::snprintf(line.data(),
-                                        line.size(),
-                                        "result=fail reason=capture_timeout");
+                // Report what the dynamic registry held, so the candidate set is visible.
+                std::size_t used = 0;
+                used += static_cast<std::size_t>(std::snprintf(
+                    line.data() + used,
+                    line.size() - used,
+                    "result=fail reason=capture_timeout snap=%u written=%u",
+                    static_cast<unsigned>(snapshot.status),
+                    static_cast<unsigned>(snapshot.written)));
+                for (std::size_t i = 0; i < 6 && i < snapshot.written && used + 24 < line.size();
+                     ++i) {
+                    used += static_cast<std::size_t>(std::snprintf(
+                        line.data() + used,
+                        line.size() - used,
+                        " h=0x%X:c=0x%X",
+                        static_cast<unsigned>(dynamic[i].identity.handle),
+                        static_cast<unsigned>(dynamic[i].classTag)));
+                }
+                written = static_cast<int>(used);
             }
             if (written > 0) {
                 core::log::write(core::log::Channel::client,
