@@ -41,4 +41,10 @@ void update_part_flags() noexcept;
 /** The camera carrier's object handle; zero until a carrier is captured. */
 extern std::atomic<std::uint32_t> g_carrierHandle;
 
+/**
+ * Appends one photo event to `Sunrise\logs\photo.log`, so the trace lands on disk even when
+ * the game's own log is not flushed. Debug aid; appended per event, never truncated here.
+ */
+void trace(const char* stage, const char* text) noexcept;
+
 } // namespace sunrise::client::hooks::photo

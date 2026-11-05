@@ -20,6 +20,7 @@
 #include "../../server/bap/runtime.h"
 #include "../../state/activity_sdk/runtime.h"
 #include "../hooks/photo/photo.h"
+#include "../hooks/photo/internal.h"
 
 namespace sunrise::client::photo {
 namespace {
@@ -39,6 +40,7 @@ void report_fail(const char* reason) noexcept {
         core::log::write(core::log::Channel::client,
                          core::log::Level::warn,
                          {line.data(), static_cast<std::size_t>(written)});
+        hooks::photo::trace("carrier", line.data() + 22);
     }
 }
 
@@ -56,6 +58,7 @@ void spawn_carrier() noexcept {
     core::log::write(core::log::Channel::client,
                      core::log::Level::warn,
                      "ev=photo stage=carrier result=pending");
+    hooks::photo::trace("carrier", "result=pending");
 }
 
 /**
@@ -171,6 +174,7 @@ void poll_carrier_spawn() noexcept {
         core::log::write(core::log::Channel::client,
                          core::log::Level::warn,
                          {placed.data(), static_cast<std::size_t>(placedWritten)});
+        hooks::photo::trace("carrier", placed.data() + 22);
     }
     hooks::photo::begin_carrier_capture();
 }

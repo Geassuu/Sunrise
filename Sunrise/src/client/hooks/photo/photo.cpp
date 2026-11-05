@@ -44,6 +44,52 @@ std::atomic<std::uintptr_t> g_poolBaseSlot{0};
 std::atomic<std::uintptr_t> g_poolStrideSlot{0};
 std::atomic<std::uint32_t> g_carrierHandle{0};
 
+/**
+ * Appends one photo event to `Sunrise\logs\photo.log` beside the in-memory log, so the trace
+ * lands on disk even when the game's own log is not flushed. The file is UTF-8 and appended
+ * per event; it is a debug aid and never truncated by the photo module itself.
+ */
+void trace(const char* stage, const char* text) noexcept {
+    std::array<char, 320> line{};
+    const int used =
+        std::snprintf(line.data(), line.size(), "ev=photo stage=%s %s\n", stage, text);
+    if (used <= 0) {
+        return;
+    }
+    std::array<wchar_t, 512> wide{};
+    const int wideCount = GetModuleFileNameW(nullptr, wide.data(), static_cast<DWORD>(wide.size()));
+    if (wideCount > 0 && wideCount < static_cast<int>(wide.size())) {
+        std::wstring_view path(wide.data(), static_cast<std::size_t>(wideCount));
+        const std::size_t slash = path.find_last_of(L'\\');
+        if (slash != std::wstring_view::npos) {
+            std::array<wchar_t, 512> logPath{};
+            const int built = std::swprintf(logPath.data(),
+                                            logPath.size(),
+                                            L"%.*s\\bin\\x64\\Sunrise\\logs\\photo.log",
+                                            static_cast<int>(slash),
+                                            wide.data());
+            if (built > 0) {
+                std::array<char, 512> narrow{};
+                const int converted = WideCharToMultiByte(CP_UTF8,
+                                                          0,
+                                                          logPath.data(),
+                                                          built,
+                                                          narrow.data(),
+                                                          static_cast<int>(narrow.size()),
+                                                          nullptr,
+                                                          nullptr);
+                if (converted > 0) {
+                    FILE* file = nullptr;
+                    if (fopen_s(&file, narrow.data(), "a") == 0 && file != nullptr) {
+                        std::fwrite(line.data(), 1, static_cast<std::size_t>(used), file);
+                        std::fclose(file);
+                    }
+                }
+            }
+        }
+    }
+}
+
 namespace {
 
 namespace bindings = state::account::settings::bindings;
@@ -418,6 +464,18 @@ void apply_identity() noexcept {
     if (!g_identityPatched) {
         g_identityOriginal = *reinterpret_cast<volatile std::uint32_t*>(slot);
         g_identityPatched = true;
+        std::array<char, 96> line{};
+        const int written = std::snprintf(line.data(),
+                                          line.size(),
+                                          "ev=photo stage=identity result=applied handle=0x%X",
+                                          static_cast<unsigned>(carrier));
+        if (written > 0) {
+            core::log::write(core::log::Channel::client,
+                             core::log::Level::warn,
+                             {line.data(), static_cast<std::size_t>(written)});
+            // After "ev=photo stage=identity ".
+            trace("identity", line.data() + 23);
+        }
     }
     // Re-written every frame: the game may refresh the slot itself.
     *reinterpret_cast<volatile std::uint32_t*>(slot) = carrier;
@@ -433,6 +491,7 @@ void restore_identity() noexcept {
         *reinterpret_cast<volatile std::uint32_t*>(slot) = g_identityOriginal;
     }
     g_identityPatched = false;
+    trace("identity", "result=restored");
 }
 
 /** Drives the detached camera from the camera-frame hook. */
@@ -563,6 +622,8 @@ void refresh_player_handle() noexcept {
                         core::log::write(core::log::Channel::client,
                                          core::log::Level::warn,
                                          {line.data(), static_cast<std::size_t>(written)});
+                        // After "ev=photo stage=carrier ".
+                        trace("carrier", line.data() + 22);
                     }
                     break;
                 }
