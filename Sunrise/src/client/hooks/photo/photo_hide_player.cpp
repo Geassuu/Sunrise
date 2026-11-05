@@ -65,6 +65,16 @@ constexpr std::string_view kStaticRecordText =
 constexpr auto kStaticRecord =
     patterns::signature<patterns::signature_length(kStaticRecordText)>(kStaticRecordText);
 
+/**
+ * The sibling static processor: the same family, but it reads the record's +0x22 flag first
+ * and takes the record link from +0x10. One of the two runs per static part.
+ */
+constexpr std::string_view kStaticRecord2Text =
+    "55 56 57 41 54 41 55 48 81 EC 80 00 00 00 48 8B 05 ? ? ? ? 48 33 C4 48 89 44 24 70 "
+    "0F 10 41 22 48 8B 51 10";
+constexpr auto kStaticRecord2 =
+    patterns::signature<patterns::signature_length(kStaticRecord2Text)>(kStaticRecord2Text);
+
 /** The draw record's owner handle sits four bytes in, the same read the Studio observer makes. */
 constexpr std::size_t kDrawOwnerOffset = sizeof(std::uint32_t);
 
@@ -114,6 +124,7 @@ using StaticRecordProcessor =
 std::atomic_bool g_installed{false};
 hooking::detour::Handle g_hideHandle{};
 hooking::detour::Handle g_staticRecordHandle{};
+hooking::detour::Handle g_staticRecord2Handle{};
 /** The handle-table storage slot the tables-load decodes; zero while unresolved. */
 std::atomic<std::uintptr_t> g_tablesSlot{0};
 
@@ -337,6 +348,7 @@ void __fastcall static_record_probe(std::uintptr_t record,
     static bool reported{false};
     if (!reported) {
         reported = true;
+        trace("static", "probe=fired1");
         std::array<char, 400> line{};
         std::size_t used = 0;
         used += static_cast<std::size_t>(std::snprintf(line.data(),
@@ -378,6 +390,42 @@ void __fastcall static_record_probe(std::uintptr_t record,
     }
     const StaticRecordProcessor original =
         reinterpret_cast<StaticRecordProcessor>(g_staticRecordHandle.original);
+    if (original != nullptr) {
+        original(record, second, third, fourth);
+    }
+}
+
+/** The sibling processor's probe; logs once and names itself. */
+void __fastcall static_record_probe2(std::uintptr_t record,
+                                     std::uintptr_t second,
+                                     std::uintptr_t third,
+                                     std::uintptr_t fourth) noexcept {
+    static bool reported{false};
+    if (!reported) {
+        reported = true;
+        trace("static", "probe=fired2");
+        std::array<char, 400> line{};
+        std::size_t used = 0;
+        used += static_cast<std::size_t>(std::snprintf(line.data(),
+                                                       line.size(),
+                                                       "rec=0x%llX args=%llX,%llX,%llX",
+                                                       static_cast<unsigned long long>(record),
+                                                       static_cast<unsigned long long>(second),
+                                                       static_cast<unsigned long long>(third),
+                                                       static_cast<unsigned long long>(fourth)));
+        for (std::size_t i = 0; i < 12 && used + 12 < line.size(); ++i) {
+            std::uint32_t word = 0;
+            if (read(record + i * 4, word)) {
+                used += static_cast<std::size_t>(std::snprintf(line.data() + used,
+                                                               line.size() - used,
+                                                               " %08X",
+                                                               static_cast<unsigned>(word)));
+            }
+        }
+        trace("static", line.data());
+    }
+    const StaticRecordProcessor original =
+        reinterpret_cast<StaticRecordProcessor>(g_staticRecord2Handle.original);
     if (original != nullptr) {
         original(record, second, third, fourth);
     }
@@ -601,7 +649,7 @@ bool install() noexcept {
         report_install_failure("attach");
         return false;
     }
-    // The static part-record processor: a read-only probe until its owner field is decoded.
+    // The static part-record processors: read-only probes until the owner field is decoded.
     std::byte* const staticRecord =
         patterns::scan_main_image_unique(kStaticRecord, "photo_hide_static");
     if (staticRecord != nullptr) {
@@ -610,6 +658,15 @@ bool install() noexcept {
             g_staticRecordHandle);
     } else {
         report_install_failure("static");
+    }
+    std::byte* const staticRecord2 =
+        patterns::scan_main_image_unique(kStaticRecord2, "photo_hide_static2");
+    if (staticRecord2 != nullptr) {
+        (void)hooking::detour::install(
+            hooking::detour::Spec{staticRecord2, reinterpret_cast<void*>(&static_record_probe2)},
+            g_staticRecord2Handle);
+    } else {
+        report_install_failure("static2");
     }
     // The component tables extend the hide to draws whose owner chain is disconnected from the
     // player. A miss only narrows the hide to the chain rules, so it is logged, not fatal.
@@ -645,6 +702,7 @@ void uninstall() noexcept {
         return;
     }
     (void)hooking::detour::uninstall(g_staticRecordHandle);
+    (void)hooking::detour::uninstall(g_staticRecord2Handle);
     g_installed.store(false, std::memory_order_release);
 }
 
