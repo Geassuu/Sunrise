@@ -484,6 +484,8 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(handle, std::memory_order_release);
         g_playerParent.store(datum_parent(handle), std::memory_order_relaxed);
         update_part_flags();
+        // One read-only trace of the identity-slot record, on the first valid handle.
+        teleport::probe_identity_slot(handle);
         // The HUD policy follows the photo switch; the renderer thread pushes it each frame.
         g_hudWanted.store(settings.enabled, std::memory_order_relaxed);
         return;

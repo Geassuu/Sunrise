@@ -632,4 +632,49 @@ void probe_handle_chain() noexcept {
     }
 }
 
+/** The identity-slot record of one valid handle, logged once after the player spawns. */
+void probe_identity_slot(std::uint32_t handle) noexcept {
+    static bool reported{false};
+    if (reported || handle == 0 || handle == kInvalidHandle) {
+        return;
+    }
+    reported = true;
+    const auto target = g_controlledHandle.load(std::memory_order_acquire);
+    if (target == nullptr) {
+        return;
+    }
+    const auto* const fn = reinterpret_cast<const std::uint8_t*>(target);
+    const std::uintptr_t fnAddress = reinterpret_cast<std::uintptr_t>(fn);
+    const std::uintptr_t strideAddress = fnAddress + 0x2E + 0x01ADEB92;
+    const std::uintptr_t baseAddress = fnAddress + 0x35 + 0x01ADEB83;
+    std::uint32_t stride = 0;
+    std::uint64_t base = 0;
+    std::memcpy(&stride, reinterpret_cast<const void*>(strideAddress), sizeof(stride));
+    std::memcpy(&base, reinterpret_cast<const void*>(baseAddress), sizeof(base));
+    const std::uintptr_t slot =
+        base + static_cast<std::uintptr_t>(handle & 0x1FFFU) * stride;
+    std::array<char, 160> head{};
+    const int headWritten =
+        std::snprintf(head.data(),
+                      head.size(),
+                      "ev=photo stage=probe_identity handle=0x%X base=0x%llX stride=0x%X "
+                      "slot=0x%llX",
+                      static_cast<unsigned>(handle),
+                      static_cast<unsigned long long>(base),
+                      static_cast<unsigned>(stride),
+                      static_cast<unsigned long long>(slot));
+    if (headWritten > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {head.data(), static_cast<std::size_t>(headWritten)});
+    }
+    if (base != 0 && stride != 0) {
+        std::array<std::uint32_t, 48> record{};
+        std::memcpy(record.data(), reinterpret_cast<const void*>(slot), record.size() * 4);
+        log_words("probe_identity0", record.data());
+        log_words("probe_identity1", record.data() + 16);
+        log_words("probe_identity2", record.data() + 32);
+    }
+}
+
 } // namespace sunrise::client::hooks::teleport

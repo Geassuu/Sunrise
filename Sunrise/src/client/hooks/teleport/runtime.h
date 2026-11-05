@@ -147,6 +147,14 @@ void apply_pending(void* component) noexcept;
 void probe_handle_chain() noexcept;
 
 /**
+ * Logs the identity-slot record of one valid local-player handle: the table entry the
+ * controlled getter resolves the handle through. Runs once on the first valid handle, after
+ * the player has spawned. Read-only.
+ * @param handle The handle the getter currently returns.
+ */
+void probe_identity_slot(std::uint32_t handle) noexcept;
+
+/**
  * Writes the camera position the renderer consumes this frame. Photo mode's detached camera
  * drives the view without moving the player; the game rebuilds the pose every frame, so the
  * write lands after the game's own camera update, from the same hook that publishes it.
