@@ -561,7 +561,7 @@ void refresh_player_handle() noexcept {
                                                       static_cast<unsigned>(candidate));
                     if (written > 0) {
                         core::log::write(core::log::Channel::client,
-                                         core::log::Level::info,
+                                         core::log::Level::warn,
                                          {line.data(), static_cast<std::size_t>(written)});
                     }
                     break;

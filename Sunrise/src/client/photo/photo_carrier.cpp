@@ -51,7 +51,11 @@ std::size_t g_spawnAttempts{0};
 
 /** Spawns one squad member as the camera carrier. */
 void spawn_carrier() noexcept {
+    g_spawnAttempts = 0;
     g_spawnPending.store(true, std::memory_order_release);
+    core::log::write(core::log::Channel::client,
+                     core::log::Level::warn,
+                     "ev=photo stage=carrier result=pending");
 }
 
 /**
@@ -159,6 +163,14 @@ void poll_carrier_spawn() noexcept {
                              {line.data(), static_cast<std::size_t>(written)});
         }
         return;
+    }
+    std::array<char, 96> placed{};
+    const int placedWritten = std::snprintf(
+        placed.data(), placed.size(), "ev=photo stage=carrier result=placed row=%u", squadRow);
+    if (placedWritten > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {placed.data(), static_cast<std::size_t>(placedWritten)});
     }
     hooks::photo::begin_carrier_capture();
 }
