@@ -440,6 +440,7 @@ void report_install_failure(const char* reason) noexcept {
         core::log::write(core::log::Channel::client,
                          core::log::Level::warn,
                          {line.data(), static_cast<std::size_t>(written)});
+        trace("install", line.data() + 22);
     }
 }
 
@@ -656,6 +657,7 @@ bool install() noexcept {
         (void)hooking::detour::install(
             hooking::detour::Spec{staticRecord, reinterpret_cast<void*>(&static_record_probe)},
             g_staticRecordHandle);
+        trace("install", "static=ok");
     } else {
         report_install_failure("static");
     }
@@ -665,6 +667,7 @@ bool install() noexcept {
         (void)hooking::detour::install(
             hooking::detour::Spec{staticRecord2, reinterpret_cast<void*>(&static_record_probe2)},
             g_staticRecord2Handle);
+        trace("install", "static2=ok");
     } else {
         report_install_failure("static2");
     }
