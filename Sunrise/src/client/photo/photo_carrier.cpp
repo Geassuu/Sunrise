@@ -26,6 +26,7 @@ namespace {
 
 namespace host = server::activity::host;
 namespace sdk = state::activity_sdk;
+namespace format = state::activity_sdk::format;
 namespace squads = server::activity::activity_sdk_squads;
 namespace squad_auth = middleware::bap::activity_message::squad_auth;
 
@@ -74,11 +75,20 @@ void spawn_carrier() noexcept {
         report_fail("revalidate");
         return;
     }
-    if (view.catalog == nullptr || view.catalog->squads().empty()) {
+    const format::Scenario* const scenario = sdk::bound_scenario(view);
+    if (scenario == nullptr) {
+        report_fail("scenario");
+        return;
+    }
+    const auto scenarioSquads = sdk::scenario_squads(*view.catalog, *scenario);
+    if (scenarioSquads.empty()) {
         report_fail("squads");
         return;
     }
-    const auto& squad = view.catalog->squads()[0];
+    const auto& squad = scenarioSquads.front();
+    // The catalog row index of the first bound-scenario squad, the same trick the host UI uses.
+    const std::uint32_t squadRow =
+        static_cast<std::uint32_t>(&squad - view.catalog->squads().data());
     const auto members = sdk::squad_members(*view.catalog, squad);
     if (members.empty()) {
         report_fail("members");
@@ -90,15 +100,16 @@ void spawn_carrier() noexcept {
     requested[0] = 1;
     const std::span<const std::int32_t> counts(requested.data(), count);
     constexpr auto mode = squad_auth::Mode::mode0;
-    const auto available = squads::availability(view, 0, counts, mode);
+    const auto available = squads::availability(view, squadRow, counts, mode);
     if (available != squads::Status::ready) {
         std::array<char, 96> line{};
         const int written = std::snprintf(
             line.data(),
             line.size(),
-            "ev=photo stage=carrier result=fail reason=availability status=%u members=%u",
+            "ev=photo stage=carrier result=fail reason=availability status=%u members=%u row=%u",
             static_cast<unsigned>(available),
-            static_cast<unsigned>(members.size()));
+            static_cast<unsigned>(members.size()),
+            static_cast<unsigned>(squadRow));
         if (written > 0) {
             core::log::write(core::log::Channel::client,
                              core::log::Level::warn,
@@ -106,7 +117,7 @@ void spawn_carrier() noexcept {
         }
         return;
     }
-    const auto status = squads::place(view, 0, counts, mode);
+    const auto status = squads::place(view, squadRow, counts, mode);
     if (status != squads::Status::queued && status != squads::Status::ready) {
         std::array<char, 96> line{};
         const int written =
