@@ -48,8 +48,6 @@ constexpr std::size_t kIslandEntities = 0x60;
 /** World position and linear velocity in the embedded motion. */
 constexpr std::size_t kBodyPosition = 0x1C0;
 constexpr std::size_t kBodyVelocity = 0x230;
-/** The body's rotation quaternion, sixteen bytes before the position. */
-constexpr std::size_t kBodyRotation = 0x1B0;
 
 /** X and Y are Destiny's horizontal world-space lanes, and Z the vertical one. */
 constexpr std::size_t kHorizontalX = 0;
@@ -329,14 +327,8 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
         nativePosition = field<std::array<float, kVectorLanes>>(before, kBodyPosition);
     }
     // The detached camera freezes the world: the step runs with no time, so every body holds
-    // its pose and the cloth stops swinging. The player's own body is pinned back below.
+    // its pose and the cloth stops swinging. The player's own body becomes the camera's ride.
     const bool frozen = detached;
-    // The player's frozen facing, so the body keeps the orientation it had when the camera
-    // detached, whatever the view does.
-    std::array<float, 4> frozenRotation{};
-    if (frozen && hasBody) {
-        frozenRotation = field<std::array<float, 4>>(before, kBodyRotation);
-    }
     // Rest the body through the step: this hook writes the position, and contact damage scales
     // with speed. The held velocity goes back after the step. The free camera also carries its
     // own position, so it rests the same way.
@@ -354,12 +346,20 @@ std::int32_t __fastcall havok_step(std::byte* simulation, float deltaTime) noexc
         (enabledBeforeStep || flying || photoing || detached) ? player_body(simulation) : nullptr;
     // A character created or replaced during this step has no matching before-state.
     const bool sameBody = hasBody && body == before;
-    // The detached camera pins the player: whatever the step did, the body goes back to where
-    // it stood and keeps no velocity, so the movement input cannot move the player.
+    // The detached camera carries the player body to the staged free-camera position: the
+    // invisible body becomes an empty character the game's own camera follows, so no camera
+    // distance pass can snap the view back, and the movement input cannot move the player on
+    // its own. While no position is staged yet, the body holds where it stood.
     if (frozen && sameBody) {
-        field<std::array<float, kVectorLanes>>(body, kBodyPosition) = nativePosition;
+        std::array<float, kVectorLanes> ride = nativePosition;
+        teleport::Vector staged{};
+        if (photo::freecam_body_position(staged)) {
+            ride[0] = staged[0];
+            ride[1] = staged[1];
+            ride[2] = staged[2];
+        }
+        field<std::array<float, kVectorLanes>>(body, kBodyPosition) = ride;
         field<std::array<float, kVectorLanes>>(body, kBodyVelocity) = {};
-        field<std::array<float, 4>>(body, kBodyRotation) = frozenRotation;
     }
     // Re-read after the step, so a toggle from the interface thread lands before a position write.
     // The free camera carries its position through the same branch as noclip, without needing the

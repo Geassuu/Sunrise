@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "../teleport/runtime.h"
+
 // Forward-declared so this header stays free of the D3D headers, whose `interface` macro
 // corrupts any account header included after them. The capture implementation includes the
 // full definitions in its own translation unit.
@@ -51,17 +53,18 @@ void apply(void* component) noexcept;
 
 /**
  * Drives the detached camera. Called from the camera-frame hook after the game computes its
- * own pose: the accumulated free-camera position is staged for the renderer.
+ * own pose. The invisible player body is carried to the accumulated free-camera position, so
+ * the game's own camera follows it: the body becomes an empty character the camera rides on.
  * @param playerIndex Player whose camera block is written.
  */
 void drive_camera(std::uint32_t playerIndex) noexcept;
 
 /**
- * Writes the staged free-camera position into the pose block. Called from the Present hook
- * right before the game renders, so every game camera pass this frame has already run and
- * nothing can snap the camera back to the player before the frame is drawn.
+ * Reads the staged free-camera position the physics pin carries the player body to.
+ * @param position Receives the position.
+ * @return True while a position is staged.
  */
-void drive_camera_present() noexcept;
+[[nodiscard]] bool freecam_body_position(teleport::Vector& position) noexcept;
 
 /**
  * Applies a pending HUD state. Called every frame from the renderer thread, the same thread

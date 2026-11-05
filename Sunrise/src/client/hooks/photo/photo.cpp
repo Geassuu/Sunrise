@@ -430,7 +430,8 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     for (std::size_t lane = 0; lane < teleport::kVectorLanes; ++lane) {
         g_freecamPosition[lane] += velocity[lane] * delta;
     }
-    // Stage the pose for the renderer thread; the write itself happens before the draw.
+    // Stage the position the physics pin carries the body to: the invisible body becomes the
+    // empty character the game's own camera rides on.
     AcquireSRWLockExclusive(&g_freecamPublishLock);
     g_freecamPublishPosition = g_freecamPosition;
     g_freecamPublishPlayerIndex = playerIndex;
@@ -438,20 +439,13 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     ReleaseSRWLockExclusive(&g_freecamPublishLock);
 }
 
-/** Writes the staged free-camera position right before the frame draws. */
-void drive_camera_present() noexcept {
-    if (!g_detached.load(std::memory_order_relaxed)) {
-        return;
-    }
+/** Reads the staged free-camera position the physics pin carries the body to. */
+bool freecam_body_position(teleport::Vector& position) noexcept {
     AcquireSRWLockShared(&g_freecamPublishLock);
     const bool valid = g_freecamPublishValid;
-    const teleport::Vector position = g_freecamPublishPosition;
-    const std::uint32_t playerIndex = g_freecamPublishPlayerIndex;
+    position = g_freecamPublishPosition;
     ReleaseSRWLockShared(&g_freecamPublishLock);
-    if (!valid) {
-        return;
-    }
-    (void)teleport::write_camera_position(playerIndex, position);
+    return valid;
 }
 
 /** Sets the velocity the coming simulation step integrates. */

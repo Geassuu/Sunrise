@@ -315,9 +315,6 @@ void present(IDXGISwapChain* swapChain) noexcept {
     }
     bool framed = false;
     if (g_resources.swapChain == swapChain && fully_active_locked()) {
-        // The free camera write lands last, after every game camera pass, so the frame draws
-        // with the staged pose and nothing can snap it back to the player.
-        photo::drive_camera_present();
         // The capture runs before the overlay draws, so the photo holds only the game frame.
         photo::try_capture(swapChain, g_resources.device, g_resources.context);
         // The HUD lifetime push shares this thread with the Activity Host window.
