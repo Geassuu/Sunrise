@@ -723,4 +723,28 @@ void probe_identity_slot(std::uint32_t handle) noexcept {
     }
 }
 
+/** Resolves the local-player identity slot address. */
+bool identity_slot_address(std::uintptr_t& address) noexcept {
+    static std::uintptr_t cached{};
+    if (cached != 0) {
+        address = cached;
+        return true;
+    }
+    const auto target = g_controlledHandle.load(std::memory_order_acquire);
+    if (target == nullptr) {
+        return false;
+    }
+    const std::uintptr_t fnAddress = reinterpret_cast<std::uintptr_t>(target);
+    std::uint64_t base = 0;
+    std::memcpy(&base,
+                reinterpret_cast<const void*>(fnAddress + 0x35 + 0x01ADEB83),
+                sizeof(base));
+    if (base == 0) {
+        return false;
+    }
+    cached = base + 0x54;
+    address = cached;
+    return true;
+}
+
 } // namespace sunrise::client::hooks::teleport

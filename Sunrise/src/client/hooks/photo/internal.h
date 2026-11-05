@@ -38,4 +38,7 @@ extern std::array<std::atomic<std::uint32_t>, 16> g_playerModels;
  */
 void update_part_flags() noexcept;
 
+/** The camera carrier's object handle; zero until a carrier is captured. */
+extern std::atomic<std::uint32_t> g_carrierHandle;
+
 } // namespace sunrise::client::hooks::photo

@@ -155,6 +155,15 @@ void probe_handle_chain() noexcept;
 void probe_identity_slot(std::uint32_t handle) noexcept;
 
 /**
+ * Resolves the address of the local-player identity slot: the table entry the controlled
+ * getter reads its handle from. The photo module writes the camera carrier's handle there
+ * while the detached camera is on, and restores the original on exit.
+ * @param address Receives the slot address.
+ * @return True when the slot resolved.
+ */
+[[nodiscard]] bool identity_slot_address(std::uintptr_t& address) noexcept;
+
+/**
  * Writes the camera position the renderer consumes this frame. Photo mode's detached camera
  * drives the view without moving the player; the game rebuilds the pose every frame, so the
  * write lands after the game's own camera update, from the same hook that publishes it.

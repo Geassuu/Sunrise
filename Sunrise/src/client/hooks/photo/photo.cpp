@@ -42,6 +42,7 @@ std::atomic_bool g_hideInstalled{false};
 std::atomic_bool g_capturePending{false};
 std::atomic<std::uintptr_t> g_poolBaseSlot{0};
 std::atomic<std::uintptr_t> g_poolStrideSlot{0};
+std::atomic<std::uint32_t> g_carrierHandle{0};
 
 namespace {
 
@@ -113,6 +114,13 @@ bool g_freecamPublishValid{false};
 std::atomic_bool g_hudWanted{false};
 /** The HUD state already applied, so the push happens once per switch. */
 std::atomic_bool g_hudApplied{false};
+/** Identity-slot state; owned by the camera thread. */
+bool g_identityPatched{false};
+std::uint32_t g_identityOriginal{kInvalidHandle};
+/** Carrier-capture state: the dynamic handles present before the spawn, and the wait. */
+std::atomic_bool g_carrierCapturePending{false};
+std::size_t g_carrierCaptureFrames{0};
+std::array<std::uint32_t, hooks::world_objects::kDynamicHandleCapacity> g_carrierBeforeHandles{};
 
 /**
  * Takes the account's movement bindings once they are loaded.
@@ -397,6 +405,36 @@ bool detached_active() noexcept {
     return g_detached.load(std::memory_order_relaxed);
 }
 
+/** Writes the carrier handle into the identity slot and restores it on exit. */
+void apply_identity() noexcept {
+    const std::uint32_t carrier = g_carrierHandle.load(std::memory_order_relaxed);
+    if (carrier == 0 || carrier == kInvalidHandle) {
+        return;
+    }
+    std::uintptr_t slot = 0;
+    if (!teleport::identity_slot_address(slot)) {
+        return;
+    }
+    if (!g_identityPatched) {
+        g_identityOriginal = *reinterpret_cast<volatile std::uint32_t*>(slot);
+        g_identityPatched = true;
+    }
+    // Re-written every frame: the game may refresh the slot itself.
+    *reinterpret_cast<volatile std::uint32_t*>(slot) = carrier;
+}
+
+/** Restores the original identity when the detached camera turns off. */
+void restore_identity() noexcept {
+    if (!g_identityPatched) {
+        return;
+    }
+    std::uintptr_t slot = 0;
+    if (teleport::identity_slot_address(slot)) {
+        *reinterpret_cast<volatile std::uint32_t*>(slot) = g_identityOriginal;
+    }
+    g_identityPatched = false;
+}
+
 /** Drives the detached camera from the camera-frame hook. */
 void drive_camera(std::uint32_t playerIndex) noexcept {
     const client::photo::Settings settings = client::photo::get();
@@ -407,6 +445,7 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
         AcquireSRWLockExclusive(&g_freecamPublishLock);
         g_freecamPublishValid = false;
         ReleaseSRWLockExclusive(&g_freecamPublishLock);
+        restore_identity();
         return;
     }
     g_detached.store(true, std::memory_order_relaxed);
@@ -437,6 +476,9 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     g_freecamPublishPlayerIndex = playerIndex;
     g_freecamPublishValid = true;
     ReleaseSRWLockExclusive(&g_freecamPublishLock);
+    // While the detached camera is on, the carrier becomes the game's local player identity,
+    // so the boundary countdown and the player's own body stay untouched.
+    apply_identity();
 }
 
 /** Reads the staged free-camera position the physics pin carries the body to. */
@@ -488,10 +530,60 @@ void refresh_player_handle() noexcept {
         teleport::probe_identity_slot(handle);
         // The HUD policy follows the photo switch; the renderer thread pushes it each frame.
         g_hudWanted.store(settings.enabled, std::memory_order_relaxed);
-        return;
+    } else {
+        g_playerHandle.store(kInvalidHandle, std::memory_order_release);
+        g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
     }
-    g_playerHandle.store(kInvalidHandle, std::memory_order_release);
-    g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
+    // The carrier capture waits for the spawned actor to appear among the dynamic handles.
+    if (g_carrierCapturePending.load(std::memory_order_relaxed)) {
+        ++g_carrierCaptureFrames;
+        if (g_carrierCaptureFrames > 900) {
+            g_carrierCapturePending.store(false, std::memory_order_relaxed);
+        } else if (TryAcquireSRWLockShared(&objects::g_lock)) {
+            for (std::size_t i = 0; i < objects::kDynamicHandleCapacity; ++i) {
+                const std::uint32_t candidate = objects::g_dynamicHandles[i];
+                if (candidate == 0 || candidate == kInvalidHandle) {
+                    continue;
+                }
+                bool known = false;
+                for (std::size_t b = 0; b < objects::kDynamicHandleCapacity
+                                        && g_carrierBeforeHandles[b] != 0;
+                     ++b) {
+                    known = known || g_carrierBeforeHandles[b] == candidate;
+                }
+                if (!known) {
+                    g_carrierHandle.store(candidate, std::memory_order_release);
+                    g_carrierCapturePending.store(false, std::memory_order_relaxed);
+                    std::array<char, 96> line{};
+                    const int written = std::snprintf(line.data(),
+                                                      line.size(),
+                                                      "ev=photo stage=carrier result=captured handle=0x%X",
+                                                      static_cast<unsigned>(candidate));
+                    if (written > 0) {
+                        core::log::write(core::log::Channel::client,
+                                         core::log::Level::info,
+                                         {line.data(), static_cast<std::size_t>(written)});
+                    }
+                    break;
+                }
+            }
+            ReleaseSRWLockShared(&objects::g_lock);
+        }
+    }
+}
+
+/** Snapshots the dynamic handles and opens the carrier-capture wait. */
+void begin_carrier_capture() noexcept {
+    namespace objects = hooks::world_objects;
+    g_carrierBeforeHandles = {};
+    if (TryAcquireSRWLockShared(&objects::g_lock)) {
+        for (std::size_t i = 0; i < objects::kDynamicHandleCapacity; ++i) {
+            g_carrierBeforeHandles[i] = objects::g_dynamicHandles[i];
+        }
+        ReleaseSRWLockShared(&objects::g_lock);
+    }
+    g_carrierCaptureFrames = 0;
+    g_carrierCapturePending.store(true, std::memory_order_release);
 }
 
 /** Applies a pending HUD state from the renderer thread. */
@@ -539,6 +631,8 @@ void reset() noexcept {
     }
     // The hide switch is now off, so this restores every patched part flag.
     update_part_flags();
+    // Hand the identity back before the hooks leave, in case the game is not shutting down.
+    restore_identity();
     // The game is shutting down, so the HUD state does not need handing back.
     g_hudWanted.store(false, std::memory_order_relaxed);
     g_hudApplied.store(false, std::memory_order_relaxed);

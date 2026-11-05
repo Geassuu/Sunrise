@@ -18,6 +18,7 @@
 #include "../../../core/ui/components/label/ui_label_component.h"
 #include "../../../core/ui/components/toggle/ui_toggle_component.h"
 #include "../../../core/ui/notice/ui_notice_overlay.h"
+#include "../../photo/photo_carrier.h"
 #include "../../photo/photo_settings_store.h"
 #include "../../hooks/photo/photo.h"
 
@@ -212,6 +213,14 @@ void draw() noexcept {
         core::ui::components::toggle::control("Detached camera##photo", settings.detached) || changed;
     if (settings.detached) {
         ImGui::TextDisabled("The camera flies free; the player stands still.");
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Spawn camera carrier##photo")) {
+        client::photo::spawn_carrier();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Places one squad member and hands the camera to it while detached.");
     }
 
     ImGui::Spacing();

@@ -73,6 +73,12 @@ void drive_camera(std::uint32_t playerIndex) noexcept;
 void sync_hud() noexcept;
 
 /**
+ * Snapshots the dynamic handles and opens the carrier-capture wait; the per-frame refresh
+ * finishes it when the spawned actor appears.
+ */
+void begin_carrier_capture() noexcept;
+
+/**
  * Sets the velocity the coming simulation step integrates.
  * @param body Character rigid body. Live only inside the step hook.
  */

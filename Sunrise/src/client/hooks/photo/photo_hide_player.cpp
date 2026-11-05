@@ -108,6 +108,7 @@ enum class Match : std::uint32_t {
     player = 1,
     parent = 2,
     component = 3,
+    carrier = 4,
 };
 
 /**
@@ -201,15 +202,20 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
 }
 
 /**
- * Tests one draw owner against the local player. The match set is the player object and its
- * parent: the first-person weapon hangs off the player's chain, while entity-level attachments
- * like the class-item cloth can hang off the player's parent as a sibling object.
+ * Tests one draw owner against the local player and the camera carrier. The match set is the
+ * player object and its parent: the first-person weapon hangs off the player's chain, while
+ * entity-level attachments like the class-item cloth can hang off the player's parent as a
+ * sibling object. The carrier matches on its own object and its children.
  * @param owner Draw owner handle to test.
  * @return What the owner matched, or Match::none.
  */
 [[nodiscard]] Match match_kind(std::uint32_t owner) noexcept {
     if (owns_player_object(owner)) {
         return Match::player;
+    }
+    const std::uint32_t carrier = g_carrierHandle.load(std::memory_order_relaxed);
+    if (carrier != 0 && owner == carrier) {
+        return Match::carrier;
     }
     const std::uint32_t player = g_playerHandle.load(std::memory_order_acquire);
     if (player == kInvalidHandle) {
@@ -232,6 +238,9 @@ template <typename Value> [[nodiscard]] bool read(std::uintptr_t address, Value&
         }
         if (parent == playerParent) {
             return Match::parent;
+        }
+        if (carrier != 0 && parent == carrier) {
+            return Match::carrier;
         }
         cursor = parent;
     }
