@@ -168,8 +168,8 @@ std::uint32_t g_identityOriginal{kInvalidHandle};
 std::atomic_bool g_carrierCapturePending{false};
 std::size_t g_carrierCaptureFrames{0};
 std::array<std::uint32_t, hooks::world_objects::kDynamicHandleCapacity> g_carrierBeforeHandles{};
-/** Whether the hide switch was on last frame; edges report the collected model tags. */
-bool g_hideWasOn{false};
+/** Whether the photo switch was on last frame; edges report the collected model tags. */
+bool g_reportWasOn{false};
 
 /**
  * Takes the account's movement bindings once they are loaded.
@@ -594,9 +594,9 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(kInvalidHandle, std::memory_order_release);
         g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
     }
-    // Report the collected model tags once per hide switch-on, for the effects patcher.
-    const bool hideOn = settings.enabled && settings.hidePlayer;
-    if (hideOn && !g_hideWasOn) {
+    // Report the collected model tags once per photo switch-on, for the effects patcher.
+    const bool reportNow = settings.enabled && settings.hidePlayer && !g_reportWasOn;
+    if (reportNow) {
         std::array<char, 320> line{};
         std::size_t used = 0;
         used += static_cast<std::size_t>(std::snprintf(line.data(), line.size(), "models="));
@@ -614,7 +614,7 @@ void refresh_player_handle() noexcept {
             trace("models", line.data() + 7);
         }
     }
-    g_hideWasOn = hideOn;
+    g_reportWasOn = settings.enabled && settings.hidePlayer;
     // The carrier capture waits for the spawned actor to appear among the dynamic handles.
     if (g_carrierCapturePending.load(std::memory_order_relaxed)) {
         ++g_carrierCaptureFrames;
