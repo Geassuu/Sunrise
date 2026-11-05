@@ -85,38 +85,41 @@ void spawn_carrier() noexcept {
         report_fail("squads");
         return;
     }
-    const auto& squad = scenarioSquads.front();
-    // The catalog row index of the first bound-scenario squad, the same trick the host UI uses.
-    const std::uint32_t squadRow =
-        static_cast<std::uint32_t>(&squad - view.catalog->squads().data());
-    const auto members = sdk::squad_members(*view.catalog, squad);
-    if (members.empty()) {
-        report_fail("members");
+    // The first squad whose authored flags allow a placement, the same rule the host UI uses
+    // to enable its place button.
+    std::optional<std::uint32_t> chosen{};
+    std::size_t chosenMemberCount = 0;
+    for (const auto& candidate : scenarioSquads) {
+        const std::uint32_t row =
+            static_cast<std::uint32_t>(&candidate - view.catalog->squads().data());
+        if (!format::squad_runnable(candidate.flags)) {
+            continue;
+        }
+        const auto members = sdk::squad_members(*view.catalog, candidate);
+        if (members.empty()) {
+            continue;
+        }
+        std::array<std::int32_t, squad_auth::kMaximumRequestedCountLength> requested{};
+        const std::size_t count = (std::min)(members.size(), requested.size());
+        requested[0] = 1;
+        const std::span<const std::int32_t> counts(requested.data(), count);
+        constexpr auto mode = squad_auth::Mode::mode0;
+        if (squads::availability(view, row, counts, mode) == squads::Status::ready) {
+            chosen = row;
+            chosenMemberCount = count;
+            break;
+        }
+    }
+    if (!chosen.has_value()) {
+        report_fail("runnable");
         return;
     }
+    const std::uint32_t squadRow = *chosen;
     // One actor of the first member; the vector length must match the authored members.
     std::array<std::int32_t, squad_auth::kMaximumRequestedCountLength> requested{};
-    const std::size_t count = (std::min)(members.size(), requested.size());
     requested[0] = 1;
-    const std::span<const std::int32_t> counts(requested.data(), count);
+    const std::span<const std::int32_t> counts(requested.data(), chosenMemberCount);
     constexpr auto mode = squad_auth::Mode::mode0;
-    const auto available = squads::availability(view, squadRow, counts, mode);
-    if (available != squads::Status::ready) {
-        std::array<char, 96> line{};
-        const int written = std::snprintf(
-            line.data(),
-            line.size(),
-            "ev=photo stage=carrier result=fail reason=availability status=%u members=%u row=%u",
-            static_cast<unsigned>(available),
-            static_cast<unsigned>(members.size()),
-            static_cast<unsigned>(squadRow));
-        if (written > 0) {
-            core::log::write(core::log::Channel::client,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(written)});
-        }
-        return;
-    }
     const auto status = squads::place(view, squadRow, counts, mode);
     if (status != squads::Status::queued && status != squads::Status::ready) {
         std::array<char, 96> line{};
