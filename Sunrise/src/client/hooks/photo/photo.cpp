@@ -536,9 +536,9 @@ void drive_camera(std::uint32_t playerIndex) noexcept {
     g_freecamPublishPlayerIndex = playerIndex;
     g_freecamPublishValid = true;
     ReleaseSRWLockExclusive(&g_freecamPublishLock);
-    // While the detached camera is on, the carrier becomes the game's local player identity,
-    // so the boundary countdown and the player's own body stay untouched.
-    apply_identity();
+    // The identity redirect is dormant: the game camera is bound to the real player character,
+    // not to the identity handle, so redirecting it froze the view while the input drove the
+    // carrier. The carrier machinery stays for a future camera-anchor redirect.
 }
 
 /** Reads the staged free-camera position the physics pin carries the body to. */
