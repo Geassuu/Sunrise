@@ -10,6 +10,7 @@
 #include "../../cursor/runtime.h"
 #include "../../inactivity/inactivity_override.h"
 #include "../../photo/photo.h"
+#include "../../../photo/photo_carrier.h"
 #include "../../polled_input/runtime.h"
 #include "../input/input.h"
 #include "graphics_renderer_report.h"
@@ -319,6 +320,8 @@ void present(IDXGISwapChain* swapChain) noexcept {
         photo::try_capture(swapChain, g_resources.device, g_resources.context);
         // The HUD lifetime push shares this thread with the Activity Host window.
         photo::sync_hud();
+        // A pending carrier spawn retries here until the activity link settles.
+        ::sunrise::client::photo::poll_carrier_spawn();
         render_frame_locked();
         framed = true;
     }

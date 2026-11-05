@@ -44,17 +44,42 @@ void report_fail(const char* reason) noexcept {
 
 } // namespace
 
+/** Whether a spawn attempt is waiting for the per-frame poll. */
+std::atomic_bool g_spawnPending{false};
+/** Frames the current attempt has retried transient failures. */
+std::size_t g_spawnAttempts{0};
+
 /** Spawns one squad member as the camera carrier. */
 void spawn_carrier() noexcept {
+    g_spawnPending.store(true, std::memory_order_release);
+}
+
+/**
+ * Retries the spawn until the activity link settles. The resolve needs exactly one
+ * authenticated link, which loading and transitions do not always provide; every other
+ * refusal is definitive and logged once.
+ */
+void poll_carrier_spawn() noexcept {
+    if (!g_spawnPending.load(std::memory_order_relaxed)) {
+        return;
+    }
+    ++g_spawnAttempts;
+    if (g_spawnAttempts > 600) {
+        g_spawnPending.store(false, std::memory_order_relaxed);
+        report_fail("timeout");
+        return;
+    }
     const sdk::Snapshot catalog = sdk::snapshot();
     if (!catalog) {
         report_fail("catalog");
+        g_spawnPending.store(false, std::memory_order_relaxed);
         return;
     }
     host::DiagnosticsSnapshot diagnostics{};
     host::snapshot(diagnostics);
     if (diagnostics.instanceCount == 0) {
         report_fail("instance");
+        g_spawnPending.store(false, std::memory_order_relaxed);
         return;
     }
     const host::InstanceSnapshot& instance = diagnostics.instances[0];
@@ -63,8 +88,8 @@ void spawn_carrier() noexcept {
     const sdk::Selection selection{
         instance.binding, link.matchingLinks, link.activityClientGeneration};
     sdk::BoundView view{};
+    // Transient: retry silently until the link count settles.
     if (sdk::resolve(catalog, selection, view) != sdk::Status::ready) {
-        report_fail("resolve");
         return;
     }
     server::bap::ActivityLinkView current{};
@@ -72,9 +97,9 @@ void spawn_carrier() noexcept {
     if (sdk::revalidate(view, instance.binding, current.matchingLinks,
                         current.activityClientGeneration)
         != sdk::Status::ready) {
-        report_fail("revalidate");
         return;
     }
+    g_spawnPending.store(false, std::memory_order_relaxed);
     const format::Scenario* const scenario = sdk::bound_scenario(view);
     if (scenario == nullptr) {
         report_fail("scenario");
