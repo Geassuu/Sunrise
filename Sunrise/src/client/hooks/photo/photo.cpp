@@ -170,6 +170,8 @@ std::size_t g_carrierCaptureFrames{0};
 std::array<std::uint32_t, hooks::world_objects::kDynamicHandleCapacity> g_carrierBeforeHandles{};
 /** Whether the photo switch was on last frame; edges report the collected model tags. */
 bool g_reportWasOn{false};
+/** The session report fires once after the player first spawns; no toggle needed. */
+bool g_sessionReported{false};
 /** The report waits for the draw pass to collect models after the enable edge. */
 bool g_reportPending{false};
 std::size_t g_reportFrames{0};
@@ -600,10 +602,10 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(kInvalidHandle, std::memory_order_release);
         g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
     }
-    // Report the collected model tags once per photo switch-on, for the effects patcher. The
-    // collection happens in the draw pass later in the frame, so the report waits for models.
-    const bool reportNow = settings.enabled && settings.hidePlayer && !g_reportWasOn;
-    if (reportNow && !g_reportPending) {
+    // Report the collected model tags once per session, after the player first spawns; no
+    // toggle is needed. The collection happens in the draw pass, so the report waits.
+    if (!g_sessionReported && g_playerHandle.load(std::memory_order_acquire) != kInvalidHandle
+        && !g_reportPending) {
         g_reportPending = true;
         g_reportFrames = 0;
     }
@@ -629,6 +631,7 @@ void refresh_player_handle() noexcept {
             }
             trace("models", line.data() + 7);
             g_reportPending = false;
+            g_sessionReported = true;
             // Open the dynamic-entity wait; the snapshot retries below until it lands.
             g_dynamicReportPending = true;
             g_dynamicReportFrames = 0;
