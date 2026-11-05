@@ -141,23 +141,9 @@ void apply_pending(void* component) noexcept;
 [[nodiscard]] bool camera_pose(CameraPose& pose) noexcept;
 
 /**
- * Logs the controlled-handle getter chain once, for reverse engineering: the function bytes
- * and the callee it reads the local-player handle from. Read-only.
- */
-void probe_handle_chain() noexcept;
-
-/**
- * Logs the identity-slot record of one valid local-player handle: the table entry the
- * controlled getter resolves the handle through. Runs once on the first valid handle, after
- * the player has spawned. Read-only.
- * @param handle The handle the getter currently returns.
- */
-void probe_identity_slot(std::uint32_t handle) noexcept;
-
-/**
  * Resolves the address of the local-player identity slot: the table entry the controlled
- * getter reads its handle from. The photo module writes the camera carrier's handle there
- * while the detached camera is on, and restores the original on exit.
+ * getter reads its handle from. Dormant: the game camera is bound to the real player
+ * character, so the camera-carrier redirect stays off.
  * @param address Receives the slot address.
  * @return True when the slot resolved.
  */

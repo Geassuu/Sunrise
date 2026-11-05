@@ -507,33 +507,9 @@ void update_part_flags() noexcept {
         std::uintptr_t table = 0;
         const std::size_t rows = find_part_table(model, table);
         if (rows == 0) {
-            std::array<char, 96> line{};
-            const int written =
-                std::snprintf(line.data(),
-                              line.size(),
-                              "ev=photo stage=part_flags model=0x%08X result=no_table",
-                              static_cast<unsigned>(handle));
-            if (written > 0) {
-                core::log::write(core::log::Channel::client,
-                                 core::log::Level::warn,
-                                 {line.data(), static_cast<std::size_t>(written)});
-            }
             continue;
         }
         patch_model_parts(rows, table);
-        std::array<char, 128> line{};
-        const int written =
-            std::snprintf(line.data(),
-                          line.size(),
-                          "ev=photo stage=part_flags model=0x%08X table=+0x%llX rows=%u",
-                          static_cast<unsigned>(handle),
-                          static_cast<unsigned long long>(table - model),
-                          static_cast<unsigned>(rows));
-        if (written > 0) {
-            core::log::write(core::log::Channel::client,
-                             core::log::Level::warn,
-                             {line.data(), static_cast<std::size_t>(written)});
-        }
     }
     g_flagsPatched = true;
 }

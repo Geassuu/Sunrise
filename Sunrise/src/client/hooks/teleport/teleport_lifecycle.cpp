@@ -182,8 +182,6 @@ bool install() noexcept {
         return fail("attach");
     }
     publish_targets(reinterpret_cast<ControlledHandle>(handle), singleton);
-    // One read-only trace of the local-player handle chain, for the camera-carrier work.
-    probe_handle_chain();
     client::diagnostics::studio::initialize();
     // The injected press needs the game's key tables. Without them the move still lands, it just
     // stays invisible until the player moves, so we log instead of failing.
