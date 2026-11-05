@@ -141,6 +141,12 @@ void apply_pending(void* component) noexcept;
 [[nodiscard]] bool camera_pose(CameraPose& pose) noexcept;
 
 /**
+ * Logs the controlled-handle getter chain once, for reverse engineering: the function bytes
+ * and the callee it reads the local-player handle from. Read-only.
+ */
+void probe_handle_chain() noexcept;
+
+/**
  * Writes the camera position the renderer consumes this frame. Photo mode's detached camera
  * drives the view without moving the player; the game rebuilds the pose every frame, so the
  * write lands after the game's own camera update, from the same hook that publishes it.

@@ -527,4 +527,74 @@ bool write_camera_position(std::uint32_t playerIndex, const Vector& position) no
     return true;
 }
 
+/** Logs one line of sixteen hex words. */
+void log_words(const char* stage, const std::uint32_t* words) noexcept {
+    std::array<char, 256> line{};
+    std::size_t used = 0;
+    used += static_cast<std::size_t>(
+        std::snprintf(line.data(), line.size(), "ev=photo stage=%s", stage));
+    for (std::size_t i = 0; i < 16 && used + 10 < line.size(); ++i) {
+        used += static_cast<std::size_t>(std::snprintf(
+            line.data() + used, line.size() - used, " %08X", static_cast<unsigned>(words[i])));
+    }
+    core::log::write(core::log::Channel::client, core::log::Level::warn, {line.data(), used});
+}
+
+/**
+ * Logs the controlled-handle getter chain once. The function writes the local player's biped
+ * handle through a callee that owns the real global; both bodies are logged so the global's
+ * rip-relative address can be read off the disassembly.
+ */
+void probe_handle_chain() noexcept {
+    static bool reported{false};
+    if (reported) {
+        return;
+    }
+    reported = true;
+    const auto target = g_controlledHandle.load(std::memory_order_acquire);
+    if (target == nullptr) {
+        return;
+    }
+    const auto* const fn = reinterpret_cast<const std::uint8_t*>(target);
+    const std::uintptr_t fnAddress = reinterpret_cast<std::uintptr_t>(fn);
+    std::array<std::uint32_t, 16> words{};
+    std::memcpy(words.data(), fn, words.size() * sizeof(std::uint32_t));
+    std::array<char, 96> head{};
+    const int headWritten =
+        std::snprintf(head.data(), head.size(), "ev=photo stage=probe_handle fn=0x%p", fn);
+    if (headWritten > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {head.data(), static_cast<std::size_t>(headWritten)});
+    }
+    log_words("probe_handle_fn", words.data());
+    // The relative call that resolves the handle; the pattern's own layout places it early.
+    std::uintptr_t callTarget = 0;
+    for (std::size_t i = 0; i + 5 <= words.size() * sizeof(std::uint32_t); ++i) {
+        if (fn[i] == 0xE8) {
+            const std::int32_t disp = static_cast<std::int32_t>(static_cast<std::uint32_t>(fn[i + 1])
+                                                                | (static_cast<std::uint32_t>(fn[i + 2]) << 8)
+                                                                | (static_cast<std::uint32_t>(fn[i + 3]) << 16)
+                                                                | (static_cast<std::uint32_t>(fn[i + 4]) << 24));
+            callTarget = fnAddress + i + 5 + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(disp));
+            break;
+        }
+    }
+    std::array<char, 96> callLine{};
+    const int callWritten = std::snprintf(
+        callLine.data(), callLine.size(), "ev=photo stage=probe_handle call=0x%p", reinterpret_cast<void*>(callTarget));
+    if (callWritten > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {callLine.data(), static_cast<std::size_t>(callWritten)});
+    }
+    if (callTarget != 0) {
+        std::array<std::uint32_t, 32> callee{};
+        std::memcpy(callee.data(), reinterpret_cast<const void*>(callTarget),
+                    callee.size() * sizeof(std::uint32_t));
+        log_words("probe_handle_callee0", callee.data());
+        log_words("probe_handle_callee1", callee.data() + 16);
+    }
+}
+
 } // namespace sunrise::client::hooks::teleport
