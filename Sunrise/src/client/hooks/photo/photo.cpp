@@ -625,6 +625,26 @@ void refresh_player_handle() noexcept {
                                                                static_cast<unsigned>(model)));
             }
             trace("models", line.data() + 7);
+            // Also report the dynamic entities with their classes, so equip-spawned overlays
+            // like the sword lightning shell can be located.
+            std::array<objects::DynamicInstance, objects::kDynamicHandleCapacity> dynamic{};
+            const auto snapshot = objects::try_dynamic_snapshot(dynamic);
+            if (snapshot.status == objects::SnapshotStatus::ready && snapshot.written != 0) {
+                std::array<char, 320> dyn{};
+                std::size_t dynUsed = 0;
+                dynUsed += static_cast<std::size_t>(
+                    std::snprintf(dyn.data(), dyn.size(), "dynamic="));
+                const std::size_t cap = (std::min)(snapshot.written, static_cast<std::size_t>(12));
+                for (std::size_t i = 0; i < cap && dynUsed + 24 < dyn.size(); ++i) {
+                    dynUsed += static_cast<std::size_t>(std::snprintf(
+                        dyn.data() + dynUsed,
+                        dyn.size() - dynUsed,
+                        " 0x%X:0x%X",
+                        static_cast<unsigned>(dynamic[i].identity.handle),
+                        static_cast<unsigned>(dynamic[i].classTag)));
+                }
+                trace("dynamic", dyn.data() + 8);
+            }
             g_reportPending = false;
         }
     }
