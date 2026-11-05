@@ -53,6 +53,14 @@ std::size_t g_spawnAttempts{0};
 
 /** Spawns one squad member as the camera carrier. */
 void spawn_carrier() noexcept {
+    // A live carrier is reused; spawning another would just replace it with a new handle.
+    if (hooks::photo::carrier_live()) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         "ev=photo stage=carrier result=reused");
+        hooks::photo::trace("carrier", "result=reused");
+        return;
+    }
     g_spawnAttempts = 0;
     g_spawnPending.store(true, std::memory_order_release);
     core::log::write(core::log::Channel::client,

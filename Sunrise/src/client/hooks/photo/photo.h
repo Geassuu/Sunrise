@@ -78,6 +78,9 @@ void sync_hud() noexcept;
  */
 void begin_carrier_capture() noexcept;
 
+/** @return True while a captured carrier handle still names a live object. */
+[[nodiscard]] bool carrier_live() noexcept;
+
 /**
  * Sets the velocity the coming simulation step integrates.
  * @param body Character rigid body. Live only inside the step hook.

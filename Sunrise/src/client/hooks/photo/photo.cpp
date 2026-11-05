@@ -720,6 +720,18 @@ void begin_carrier_capture() noexcept {
     g_carrierCapturePending.store(true, std::memory_order_release);
 }
 
+/** @return True while a captured carrier handle still names a live object. */
+bool carrier_live() noexcept {
+    namespace objects = hooks::world_objects;
+    const std::uint32_t carrier = g_carrierHandle.load(std::memory_order_relaxed);
+    if (carrier == 0 || carrier == kInvalidHandle) {
+        return false;
+    }
+    objects::DatumIdentity identity{};
+    return objects::read_datum_identity(carrier, identity)
+           && identity.selfHandle == carrier;
+}
+
 /** Applies a pending HUD state from the renderer thread. */
 void sync_hud() noexcept {
     const bool wanted = g_hudWanted.load(std::memory_order_relaxed);
