@@ -596,8 +596,31 @@ void refresh_player_handle() noexcept {
     // The carrier capture waits for the spawned actor to appear among the dynamic handles.
     if (g_carrierCapturePending.load(std::memory_order_relaxed)) {
         ++g_carrierCaptureFrames;
-        if (g_carrierCaptureFrames > 900) {
+        if (g_carrierCaptureFrames > 1800) {
             g_carrierCapturePending.store(false, std::memory_order_relaxed);
+            // Report what the dynamic handles held, so the missing spawn can be explained.
+            std::size_t liveCount = 0;
+            if (TryAcquireSRWLockShared(&objects::g_lock)) {
+                for (std::size_t i = 0; i < objects::kDynamicHandleCapacity; ++i) {
+                    const std::uint32_t dynamic = objects::g_dynamicHandles[i];
+                    if (dynamic != 0 && dynamic != kInvalidHandle) {
+                        ++liveCount;
+                    }
+                }
+                ReleaseSRWLockShared(&objects::g_lock);
+            }
+            std::array<char, 128> line{};
+            const int written = std::snprintf(
+                line.data(),
+                line.size(),
+                "result=fail reason=capture_timeout live=%u",
+                static_cast<unsigned>(liveCount));
+            if (written > 0) {
+                core::log::write(core::log::Channel::client,
+                                 core::log::Level::warn,
+                                 {line.data(), static_cast<std::size_t>(written)});
+                trace("carrier", line.data());
+            }
         } else if (TryAcquireSRWLockShared(&objects::g_lock)) {
             for (std::size_t i = 0; i < objects::kDynamicHandleCapacity; ++i) {
                 const std::uint32_t candidate = objects::g_dynamicHandles[i];
