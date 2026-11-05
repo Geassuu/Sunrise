@@ -30,6 +30,7 @@
 #include "../../photo/photo_hud.h"
 #include "../noclip/runtime.h"
 #include "../teleport/runtime.h"
+#include "../world_objects/dynamic_object_registry.h"
 #include "../world_objects/internal.h"
 #include "internal.h"
 
@@ -598,23 +599,43 @@ void refresh_player_handle() noexcept {
         ++g_carrierCaptureFrames;
         if (g_carrierCaptureFrames > 1800) {
             g_carrierCapturePending.store(false, std::memory_order_relaxed);
-            // Report what the dynamic handles held, so the missing spawn can be explained.
-            std::size_t liveCount = 0;
-            if (TryAcquireSRWLockShared(&objects::g_lock)) {
-                for (std::size_t i = 0; i < objects::kDynamicHandleCapacity; ++i) {
-                    const std::uint32_t dynamic = objects::g_dynamicHandles[i];
-                    if (dynamic != 0 && dynamic != kInvalidHandle) {
-                        ++liveCount;
+            // Fallback: capture an existing dynamic object parented to the player, so the
+            // carrier does not depend on a delivered squad spawn. The ghost or the weapon is
+            // the usual candidate; both have bodies and hang off the player's chain.
+            std::array<objects::DynamicInstance, objects::kDynamicHandleCapacity> dynamic{};
+            const auto snapshot = objects::try_dynamic_snapshot(dynamic);
+            std::uint32_t fallback = 0;
+            std::uint32_t fallbackClass = 0;
+            if (snapshot.status == objects::SnapshotStatus::ready) {
+                const std::uint32_t player =
+                    g_playerHandle.load(std::memory_order_acquire);
+                for (std::size_t i = 0; i < snapshot.written; ++i) {
+                    const std::uint32_t candidate = dynamic[i].identity.handle;
+                    if (candidate == 0 || candidate == kInvalidHandle || candidate == player) {
+                        continue;
+                    }
+                    const std::uint32_t parent = datum_parent(candidate);
+                    if (parent != kInvalidHandle && parent == player) {
+                        fallback = candidate;
+                        fallbackClass = dynamic[i].classTag;
+                        break;
                     }
                 }
-                ReleaseSRWLockShared(&objects::g_lock);
             }
-            std::array<char, 128> line{};
-            const int written = std::snprintf(
-                line.data(),
-                line.size(),
-                "result=fail reason=capture_timeout live=%u",
-                static_cast<unsigned>(liveCount));
+            std::array<char, 160> line{};
+            int written = 0;
+            if (fallback != 0) {
+                g_carrierHandle.store(fallback, std::memory_order_release);
+                written = std::snprintf(line.data(),
+                                        line.size(),
+                                        "result=fallback_captured handle=0x%X class=0x%X",
+                                        static_cast<unsigned>(fallback),
+                                        static_cast<unsigned>(fallbackClass));
+            } else {
+                written = std::snprintf(line.data(),
+                                        line.size(),
+                                        "result=fail reason=capture_timeout");
+            }
             if (written > 0) {
                 core::log::write(core::log::Channel::client,
                                  core::log::Level::warn,
