@@ -595,6 +595,41 @@ void probe_handle_chain() noexcept {
         log_words("probe_handle_callee0", callee.data());
         log_words("probe_handle_callee1", callee.data() + 16);
     }
+    // The controlled function's own tail decodes the handle through two rip-relative globals:
+    //   and eax, 0x1FFF
+    //   imul eax, [fn+0x2E+0x01ADEB92]   (stride, a dword)
+    //   add  rax, [fn+0x35+0x01ADEB83]   (table base, a qword)
+    //   mov  ecx, [rax+0x54]             (the per-slot local-player handle)
+    // Read the globals and the first slots, read-only, so the local player's slot can be found.
+    const std::uintptr_t strideAddress = fnAddress + 0x2E + 0x01ADEB92;
+    const std::uintptr_t baseAddress = fnAddress + 0x35 + 0x01ADEB83;
+    std::uint32_t stride = 0;
+    std::uint64_t base = 0;
+    std::memcpy(&stride, reinterpret_cast<const void*>(strideAddress), sizeof(stride));
+    std::memcpy(&base, reinterpret_cast<const void*>(baseAddress), sizeof(base));
+    std::array<char, 128> globals{};
+    const int globalsWritten =
+        std::snprintf(globals.data(),
+                      globals.size(),
+                      "ev=photo stage=probe_handle_slots base=0x%llX stride=0x%X",
+                      static_cast<unsigned long long>(base),
+                      static_cast<unsigned>(stride));
+    if (globalsWritten > 0) {
+        core::log::write(core::log::Channel::client,
+                         core::log::Level::warn,
+                         {globals.data(), static_cast<std::size_t>(globalsWritten)});
+    }
+    if (base != 0 && stride != 0) {
+        std::array<std::uint32_t, 8> slots{};
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            const std::uintptr_t slotAddress =
+                base + static_cast<std::uintptr_t>(stride) * i + 0x54;
+            std::memcpy(&slots[i],
+                        reinterpret_cast<const void*>(slotAddress),
+                        sizeof(std::uint32_t));
+        }
+        log_words("probe_handle_slot0", slots.data());
+    }
 }
 
 } // namespace sunrise::client::hooks::teleport
