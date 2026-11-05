@@ -4,24 +4,17 @@
 
 ## 首要规则
 
-**进行任何开发工作前，必须优先参考官方文档站：**
+**进行任何思考、设计或开发之前，必须先查阅本地镜像的官方文档（`docs/` 目录），其次才是网页：**
 
-**https://projectsunrise.dev/docs/**
+- 本地镜像：**`docs/<分区>/<页面>.md`**（本仓库内，含全部 90+ 官方文档页的完整正文）：
+  - `docs/mission-scripting/` —— 任务脚本（Lua API、世界模型、SDK 视图、调试等 12 页）
+  - `docs/sunrise/` —— Sunrise 本体（架构、设置日志、启动流程、存档、Activity Host、客户端钩子、Mod 系统 7 页）
+  - `docs/sunrise-studio/` —— Sunrise Studio（界面、指南、构建、内部机制 50 页）
+  - `docs/destiny-2/` —— Destiny 2 逆向（构建、包格式、投资数据、Activity Host 协议、渲染、特效、UI、音频、AI 17 页）
+  - `docs/destiny-1/` —— Destiny 1 对照（7 页）
+- 在线站点：**https://projectsunrise.dev/docs/**（与本地镜像同源，用于核对更新）
 
-官方文档是 Sunrise / Sunrise Studio / Destiny 2 逆向结论的权威来源。任何设计、偏移、协议、类 ID、渲染管线问题的第一步都是查文档；文档没有答案时再做逆向/实验。上游源码仓库 [github.com/stanuwu/Sunrise](https://github.com/stanuwu/Sunrise) 与 [github.com/stanuwu/SunriseStudio](https://github.com/stanuwu/SunriseStudio) 的源码同样是重要参考。
-
-## 本项目中已用到的高价值文档页
-
-| 主题 | 页面 |
-|---|---|
-| 任务脚本 Lua API | /docs/mission-scripting/lua-api/ |
-| Sunrise 架构与启动顺序 | /docs/sunrise/architecture/ |
-| 设置、日志与游戏内菜单 | /docs/sunrise/settings-and-logs/ |
-| 客户端钩子全表 | /docs/sunrise/client-hooks/ |
-| Mod 系统（包补丁/合并） | /docs/sunrise/mods/ |
-| 渲染管线（渲染阶段/部件可见性/布料） | /docs/destiny-2/rendering/ |
-| Activity Host 协议（消息/槽类型） | /docs/destiny-2/activity-host-protocol/ |
-| 包格式/标签与类 | /docs/destiny-2/packages/、/docs/destiny-2/tags-and-definitions/ |
+官方文档是 Sunrise / Sunrise Studio / Destiny 2 逆向结论的权威来源。任何设计、偏移、协议、类 ID、渲染管线问题的第一步都是查本地 `docs/` 对应页面；文档没有答案时再做逆向/实验。上游源码仓库 [github.com/stanuwu/Sunrise](https://github.com/stanuwu/Sunrise) 与 [github.com/stanuwu/SunriseStudio](https://github.com/stanuwu/SunriseStudio) 的源码同样是重要参考。
 
 ## 本项目关键结论速记（从文档+逆向得到）
 
