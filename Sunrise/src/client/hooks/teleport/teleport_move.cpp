@@ -674,6 +674,52 @@ void probe_identity_slot(std::uint32_t handle) noexcept {
         log_words("probe_identity0", record.data());
         log_words("probe_identity1", record.data() + 16);
         log_words("probe_identity2", record.data() + 32);
+        // The getter indexes the table with the intermediate handle's low bits, which is not
+        // necessarily the final handle's. Scan the committed region for the entry whose +0x54
+        // holds the current handle; that entry is the local player's identity slot.
+        std::size_t matches = 0;
+        std::uint32_t matchIndex = 0;
+        std::array<std::uint32_t, 4> matchWords{};
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<const void*>(base), &info, sizeof(info)) != 0
+            && info.State == MEM_COMMIT) {
+            const std::uintptr_t regionEnd =
+                reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            const std::uintptr_t maxIndex =
+                (std::min)(static_cast<std::uintptr_t>(0x2000), (regionEnd - base) / stride);
+            for (std::uintptr_t i = 0; i < maxIndex; ++i) {
+                const std::uintptr_t address = base + i * stride + 0x54;
+                if (address + 4 > regionEnd) {
+                    break;
+                }
+                std::uint32_t value = 0;
+                std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+                if (value == handle) {
+                    if (matches == 0) {
+                        matchIndex = static_cast<std::uint32_t>(i);
+                        std::memcpy(matchWords.data(),
+                                    reinterpret_cast<const void*>(base + i * stride),
+                                    matchWords.size() * sizeof(std::uint32_t));
+                    }
+                    ++matches;
+                }
+            }
+        }
+        std::array<char, 128> scan{};
+        const int scanWritten =
+            std::snprintf(scan.data(),
+                          scan.size(),
+                          "ev=photo stage=probe_identity_scan matches=%u index=0x%X",
+                          static_cast<unsigned>(matches),
+                          static_cast<unsigned>(matchIndex));
+        if (scanWritten > 0) {
+            core::log::write(core::log::Channel::client,
+                             core::log::Level::warn,
+                             {scan.data(), static_cast<std::size_t>(scanWritten)});
+        }
+        if (matches != 0) {
+            log_words("probe_identity_match", matchWords.data());
+        }
     }
 }
 
