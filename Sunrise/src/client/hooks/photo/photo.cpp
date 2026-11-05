@@ -170,6 +170,9 @@ std::size_t g_carrierCaptureFrames{0};
 std::array<std::uint32_t, hooks::world_objects::kDynamicHandleCapacity> g_carrierBeforeHandles{};
 /** Whether the photo switch was on last frame; edges report the collected model tags. */
 bool g_reportWasOn{false};
+/** The report waits for the draw pass to collect models after the enable edge. */
+bool g_reportPending{false};
+std::size_t g_reportFrames{0};
 
 /**
  * Takes the account's movement bindings once they are loaded.
@@ -594,24 +597,35 @@ void refresh_player_handle() noexcept {
         g_playerHandle.store(kInvalidHandle, std::memory_order_release);
         g_playerParent.store(kInvalidHandle, std::memory_order_relaxed);
     }
-    // Report the collected model tags once per photo switch-on, for the effects patcher.
+    // Report the collected model tags once per photo switch-on, for the effects patcher. The
+    // collection happens in the draw pass later in the frame, so the report waits for models.
     const bool reportNow = settings.enabled && settings.hidePlayer && !g_reportWasOn;
-    if (reportNow) {
-        std::array<char, 320> line{};
-        std::size_t used = 0;
-        used += static_cast<std::size_t>(std::snprintf(line.data(), line.size(), "models="));
+    if (reportNow && !g_reportPending) {
+        g_reportPending = true;
+        g_reportFrames = 0;
+    }
+    if (g_reportPending) {
+        ++g_reportFrames;
+        std::size_t count = 0;
         for (std::atomic<std::uint32_t>& slot : g_playerModels) {
-            const std::uint32_t model = slot.load(std::memory_order_relaxed);
-            if (model == 0) {
-                continue;
-            }
-            used += static_cast<std::size_t>(std::snprintf(line.data() + used,
-                                                           line.size() - used,
-                                                           " 0x%X",
-                                                           static_cast<unsigned>(model)));
+            count += slot.load(std::memory_order_relaxed) != 0;
         }
-        if (used > 7) {
+        if (count != 0 || g_reportFrames > 600) {
+            std::array<char, 320> line{};
+            std::size_t used = 0;
+            used += static_cast<std::size_t>(std::snprintf(line.data(), line.size(), "models="));
+            for (std::atomic<std::uint32_t>& slot : g_playerModels) {
+                const std::uint32_t model = slot.load(std::memory_order_relaxed);
+                if (model == 0) {
+                    continue;
+                }
+                used += static_cast<std::size_t>(std::snprintf(line.data() + used,
+                                                               line.size() - used,
+                                                               " 0x%X",
+                                                               static_cast<unsigned>(model)));
+            }
             trace("models", line.data() + 7);
+            g_reportPending = false;
         }
     }
     g_reportWasOn = settings.enabled && settings.hidePlayer;
