@@ -9,6 +9,7 @@
 #include "photo_carrier.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 
@@ -26,6 +27,7 @@ namespace {
 namespace host = server::activity::host;
 namespace sdk = state::activity_sdk;
 namespace squads = server::activity::activity_sdk_squads;
+namespace squad_auth = middleware::bap::activity_message::squad_auth;
 
 /** @param reason Key naming the step that failed. */
 void report_fail(const char* reason) noexcept {
@@ -76,15 +78,47 @@ void spawn_carrier() noexcept {
         report_fail("squads");
         return;
     }
-    // The first authored squad, one member, ordinary placement.
-    const std::array<std::int32_t, 1> counts{1};
-    const auto status = squads::place(
-        view,
-        0,
-        counts,
-        middleware::bap::activity_message::squad_auth::Mode::mode0);
+    const auto& squad = view.catalog->squads()[0];
+    const auto members = sdk::squad_members(*view.catalog, squad);
+    if (members.empty()) {
+        report_fail("members");
+        return;
+    }
+    // One actor of the first member; the vector length must match the authored members.
+    std::array<std::int32_t, squad_auth::kMaximumRequestedCountLength> requested{};
+    const std::size_t count = (std::min)(members.size(), requested.size());
+    requested[0] = 1;
+    const std::span<const std::int32_t> counts(requested.data(), count);
+    constexpr auto mode = squad_auth::Mode::mode0;
+    const auto available = squads::availability(view, 0, counts, mode);
+    if (available != squads::Status::ready) {
+        std::array<char, 96> line{};
+        const int written = std::snprintf(
+            line.data(),
+            line.size(),
+            "ev=photo stage=carrier result=fail reason=availability status=%u members=%u",
+            static_cast<unsigned>(available),
+            static_cast<unsigned>(members.size()));
+        if (written > 0) {
+            core::log::write(core::log::Channel::client,
+                             core::log::Level::warn,
+                             {line.data(), static_cast<std::size_t>(written)});
+        }
+        return;
+    }
+    const auto status = squads::place(view, 0, counts, mode);
     if (status != squads::Status::queued && status != squads::Status::ready) {
-        report_fail("place");
+        std::array<char, 96> line{};
+        const int written =
+            std::snprintf(line.data(),
+                          line.size(),
+                          "ev=photo stage=carrier result=fail reason=place status=%u",
+                          static_cast<unsigned>(status));
+        if (written > 0) {
+            core::log::write(core::log::Channel::client,
+                             core::log::Level::warn,
+                             {line.data(), static_cast<std::size_t>(written)});
+        }
         return;
     }
     hooks::photo::begin_carrier_capture();
